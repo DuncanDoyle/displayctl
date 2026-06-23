@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import XCTest
 @testable import DisplayControlCore
@@ -73,6 +74,210 @@ final class DisplayInventoryTests: XCTestCase {
         )
 
         XCTAssertEqual(result.first?.isActive, false)
+        XCTAssertEqual(result.first?.isMain, false)
+    }
+
+    func testEmptyOnlineInventoryReturnsNoDisplays() throws {
+        XCTAssertEqual(
+            try DisplayInventory.makeDisplays(onlineIDs: [], activeIDs: [], metadata: [:]),
+            []
+        )
+    }
+
+    func testMissingMetadataFailsConfiguration() {
+        XCTAssertThrowsError(
+            try DisplayInventory.makeDisplays(onlineIDs: [7], activeIDs: [], metadata: [:])
+        ) {
+            XCTAssertEqual(
+                $0 as? DisplayControlError,
+                .configurationFailed("Missing metadata for online display 7")
+            )
+        }
+    }
+
+    func testDisplayListQueryReturnsStableRead() throws {
+        var callCount = 0
+
+        let result = try DisplayInventory.queryDisplayIDs(apiName: "TestDisplayList") {
+            maxDisplays, displays, displayCount in
+            callCount += 1
+            switch callCount {
+            case 1:
+                displayCount?.pointee = 2
+            case 2:
+                XCTAssertEqual(maxDisplays, 2)
+                displays?[0] = 11
+                displays?[1] = 22
+                displayCount?.pointee = 2
+            case 3:
+                displayCount?.pointee = 2
+            default:
+                XCTFail("Unexpected list query call")
+            }
+            return .success
+        }
+
+        XCTAssertEqual(result, [11, 22])
+        XCTAssertEqual(callCount, 3)
+    }
+
+    func testDisplayListQueryRetriesGrowthBetweenCountAndValues() throws {
+        var callCount = 0
+
+        let result = try DisplayInventory.queryDisplayIDs(apiName: "TestDisplayList") {
+            maxDisplays, displays, displayCount in
+            callCount += 1
+            switch callCount {
+            case 1:
+                displayCount?.pointee = 1
+            case 2:
+                XCTAssertEqual(maxDisplays, 1)
+                displays?[0] = 11
+                // Core Graphics may report only the number that fit in the supplied buffer.
+                displayCount?.pointee = 1
+            case 3, 4:
+                displayCount?.pointee = 2
+            case 5:
+                XCTAssertEqual(maxDisplays, 2)
+                displays?[0] = 11
+                displays?[1] = 22
+                displayCount?.pointee = 2
+            case 6:
+                displayCount?.pointee = 2
+            default:
+                XCTFail("Unexpected list query call")
+            }
+            return .success
+        }
+
+        XCTAssertEqual(result, [11, 22])
+        XCTAssertEqual(callCount, 6)
+    }
+
+    func testDisplayListQueryRetriesWhenInitialZeroCountGrows() throws {
+        var callCount = 0
+
+        let result = try DisplayInventory.queryDisplayIDs(apiName: "TestDisplayList") {
+            maxDisplays, displays, displayCount in
+            callCount += 1
+            switch callCount {
+            case 1:
+                displayCount?.pointee = 0
+            case 2:
+                XCTAssertEqual(maxDisplays, 0)
+                displayCount?.pointee = 1
+            case 3, 4:
+                displayCount?.pointee = 1
+            case 5:
+                displays?[0] = 42
+                displayCount?.pointee = 1
+            case 6:
+                displayCount?.pointee = 1
+            default:
+                XCTFail("Unexpected list query call")
+            }
+            return .success
+        }
+
+        XCTAssertEqual(result, [42])
+        XCTAssertEqual(callCount, 6)
+    }
+
+    func testDisplayListQueryReturnsCoherentShrink() throws {
+        var callCount = 0
+
+        let result = try DisplayInventory.queryDisplayIDs(apiName: "TestDisplayList") {
+            _, displays, displayCount in
+            callCount += 1
+            switch callCount {
+            case 1:
+                displayCount?.pointee = 3
+            case 2:
+                displays?[0] = 8
+                displays?[1] = 9
+                displayCount?.pointee = 2
+            case 3:
+                displayCount?.pointee = 2
+            default:
+                XCTFail("Unexpected list query call")
+            }
+            return .success
+        }
+
+        XCTAssertEqual(result, [8, 9])
+        XCTAssertEqual(callCount, 3)
+    }
+
+    func testDisplayListQueryRetriesChangeAfterValueRead() throws {
+        var callCount = 0
+
+        let result = try DisplayInventory.queryDisplayIDs(apiName: "TestDisplayList") {
+            _, displays, displayCount in
+            callCount += 1
+            switch callCount {
+            case 1:
+                displayCount?.pointee = 2
+            case 2:
+                displays?[0] = 11
+                displays?[1] = 22
+                displayCount?.pointee = 2
+            case 3, 4:
+                displayCount?.pointee = 1
+            case 5:
+                displays?[0] = 33
+                displayCount?.pointee = 1
+            case 6:
+                displayCount?.pointee = 1
+            default:
+                XCTFail("Unexpected list query call")
+            }
+            return .success
+        }
+
+        XCTAssertEqual(result, [33])
+        XCTAssertEqual(callCount, 6)
+    }
+
+    func testDisplayListQueryMapsCGError() {
+        XCTAssertThrowsError(
+            try DisplayInventory.queryDisplayIDs(apiName: "TestDisplayList") {
+                _, _, _ in .failure
+            }
+        ) {
+            XCTAssertEqual(
+                $0 as? DisplayControlError,
+                .configurationFailed("TestDisplayList count failed with error 1000")
+            )
+        }
+    }
+
+    func testDisplayListQueryFailsAfterBoundedUnstableReads() {
+        var callCount = 0
+
+        XCTAssertThrowsError(
+            try DisplayInventory.queryDisplayIDs(
+                apiName: "TestDisplayList",
+                maxAttempts: 2
+            ) { _, displays, displayCount in
+                callCount += 1
+                switch callCount % 3 {
+                case 1:
+                    displayCount?.pointee = 1
+                case 2:
+                    displays?[0] = 11
+                    displayCount?.pointee = 1
+                default:
+                    displayCount?.pointee = 2
+                }
+                return .success
+            }
+        ) {
+            XCTAssertEqual(
+                $0 as? DisplayControlError,
+                .configurationFailed("TestDisplayList display list was unstable after 2 attempts")
+            )
+        }
+        XCTAssertEqual(callCount, 6)
     }
 
     func testUsesFallbackNamesWhenLocalizedNamesAreUnavailable() throws {

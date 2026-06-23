@@ -88,7 +88,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
                 kind: kind,
                 isOnline: true,
                 isActive: isActive,
-                isMain: displayMetadata.isMain,
+                isMain: isActive && displayMetadata.isMain,
                 ddcCapability: .unknown
             )
         }
@@ -102,49 +102,68 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     }
 
     private static func onlineDisplayIDs() throws -> [CGDirectDisplayID] {
-        var count: UInt32 = 0
-        let countError = CGGetOnlineDisplayList(0, nil, &count)
-        guard countError == .success else {
-            throw DisplayControlError.configurationFailed(
-                "CGGetOnlineDisplayList count failed with error \(countError.rawValue)"
-            )
-        }
-
-        var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        var returnedCount = count
-        let listError = displayIDs.withUnsafeMutableBufferPointer { buffer in
-            CGGetOnlineDisplayList(count, buffer.baseAddress, &returnedCount)
-        }
-        guard listError == .success else {
-            throw DisplayControlError.configurationFailed(
-                "CGGetOnlineDisplayList values failed with error \(listError.rawValue)"
-            )
-        }
-
-        return Array(displayIDs.prefix(Int(returnedCount)))
+        try queryDisplayIDs(
+            apiName: "CGGetOnlineDisplayList",
+            listCall: CGGetOnlineDisplayList
+        )
     }
 
     private static func activeDisplayIDs() throws -> [CGDirectDisplayID] {
-        var count: UInt32 = 0
-        let countError = CGGetActiveDisplayList(0, nil, &count)
-        guard countError == .success else {
-            throw DisplayControlError.configurationFailed(
-                "CGGetActiveDisplayList count failed with error \(countError.rawValue)"
-            )
+        try queryDisplayIDs(
+            apiName: "CGGetActiveDisplayList",
+            listCall: CGGetActiveDisplayList
+        )
+    }
+
+    typealias DisplayListCall = (
+        UInt32,
+        UnsafeMutablePointer<CGDirectDisplayID>?,
+        UnsafeMutablePointer<UInt32>?
+    ) -> CGError
+
+    static func queryDisplayIDs(
+        apiName: String,
+        maxAttempts: Int = 3,
+        listCall: DisplayListCall
+    ) throws -> [CGDirectDisplayID] {
+        for _ in 0..<maxAttempts {
+            var capacity: UInt32 = 0
+            let countError = listCall(0, nil, &capacity)
+            guard countError == .success else {
+                throw DisplayControlError.configurationFailed(
+                    "\(apiName) count failed with error \(countError.rawValue)"
+                )
+            }
+
+            var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(capacity))
+            var returnedCount = capacity
+            let valuesError = displayIDs.withUnsafeMutableBufferPointer { buffer in
+                listCall(capacity, buffer.baseAddress, &returnedCount)
+            }
+            guard valuesError == .success else {
+                throw DisplayControlError.configurationFailed(
+                    "\(apiName) values failed with error \(valuesError.rawValue)"
+                )
+            }
+
+            var verifiedCount: UInt32 = 0
+            let verificationError = listCall(0, nil, &verifiedCount)
+            guard verificationError == .success else {
+                throw DisplayControlError.configurationFailed(
+                    "\(apiName) verification count failed with error \(verificationError.rawValue)"
+                )
+            }
+
+            guard returnedCount <= capacity, returnedCount == verifiedCount else {
+                continue
+            }
+
+            return Array(displayIDs.prefix(Int(returnedCount)))
         }
 
-        var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        var returnedCount = count
-        let listError = displayIDs.withUnsafeMutableBufferPointer { buffer in
-            CGGetActiveDisplayList(count, buffer.baseAddress, &returnedCount)
-        }
-        guard listError == .success else {
-            throw DisplayControlError.configurationFailed(
-                "CGGetActiveDisplayList values failed with error \(listError.rawValue)"
-            )
-        }
-
-        return Array(displayIDs.prefix(Int(returnedCount)))
+        throw DisplayControlError.configurationFailed(
+            "\(apiName) display list was unstable after \(maxAttempts) attempts"
+        )
     }
 
     private static func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
