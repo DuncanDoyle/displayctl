@@ -8,6 +8,11 @@ protocol SymbolResolving: Sendable {
   func resolve(_ symbol: String, frameworkPath: String?) -> UnsafeMutableRawPointer?
 }
 
+struct SymbolKey: Hashable, Sendable {
+  let symbol: String
+  let frameworkPath: String?
+}
+
 typealias CGSConfigureDisplayEnabledFn =
   @convention(c) (
     CGDisplayConfigRef?,
@@ -79,11 +84,12 @@ final class PrivateAPIBridge: @unchecked Sendable {
     return unsafeBitCast(pointer, to: IOAVServiceReadI2CFn.self)
   }
 
-  private func requireSymbol(
+  func requireSymbol(
     _ symbol: String,
     frameworkPath: String?
   ) throws -> UnsafeMutableRawPointer {
-    let resolution = cache.resolution(for: symbol) {
+    let key = SymbolKey(symbol: symbol, frameworkPath: frameworkPath)
+    let resolution = cache.resolution(for: key) {
       guard let pointer = resolver.resolve(symbol, frameworkPath: frameworkPath) else {
         return .missing
       }
@@ -106,19 +112,19 @@ private enum SymbolResolution {
 
 private final class SymbolCache: @unchecked Sendable {
   private let lock = NSLock()
-  private var resolutions: [String: SymbolResolution] = [:]
+  private var resolutions: [SymbolKey: SymbolResolution] = [:]
 
   func resolution(
-    for symbol: String,
+    for key: SymbolKey,
     resolve: () -> SymbolResolution
   ) -> SymbolResolution {
     lock.withLock {
-      if let resolution = resolutions[symbol] {
+      if let resolution = resolutions[key] {
         return resolution
       }
 
       let resolution = resolve()
-      resolutions[symbol] = resolution
+      resolutions[key] = resolution
       return resolution
     }
   }
@@ -166,6 +172,7 @@ private final class SystemSymbolResolver: SymbolResolving, @unchecked Sendable {
       return nil
     }
 
+    // Resolved pointers escape for process lifetime; retain handles and never call dlclose.
     handles[path] = handle
     return handle
   }
