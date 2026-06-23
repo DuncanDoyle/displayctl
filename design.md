@@ -17,6 +17,7 @@ The complete product will eventually:
 1. Logically connect and disconnect the MacBook's internal display or a physically connected external display.
 2. Adjust a compatible external display's hardware brightness with the Mac keyboard brightness keys.
 3. Select the keyboard brightness target using the display containing the mouse pointer.
+4. Recover automatically if the last active display is physically removed while other physically connected displays are soft-disconnected.
 
 Development is divided into phases so the private macOS hardware-control mechanisms are validated before adding a background agent or user interface.
 
@@ -276,6 +277,7 @@ A stabilization checkpoint follows Phase 1. Private APIs and both connection typ
 
 Add a background agent that:
 
+- Starts automatically for the logged-in user.
 - Requests Accessibility permission.
 - Observes brightness-key events.
 - Determines which display contains the mouse pointer.
@@ -283,6 +285,13 @@ Add a background agent that:
 - Adjusts that display through `DisplayControlCore`.
 - Allows events to pass through unchanged when the pointer is on the internal display.
 - Shows appropriate feedback without coupling key handling to DDC transport internals.
+- Observes physical and logical display reconfiguration events independently of keyboard handling.
+- When the active-display count reaches zero after a physical display removal, reconnects every physically present display that is currently soft-disconnected.
+- Verifies that at least one display became active and records a clear diagnostic if macOS exposes no recoverable display.
+
+The recovery path requires no Accessibility permission. It must run on the agent's startup as well as after display reconfiguration events so launchd restart can recover from an earlier agent failure. Recovery is limited to the zero-active-display condition; it does not override intentional display choices while any display remains active.
+
+Phase 2 automated tests must cover zero-active-display detection, startup reconciliation, reconnection of all recoverable displays, and the no-op path while any display remains active. Its hardware acceptance test must soft-disconnect the internal display, physically remove the last active external display, and verify that the internal display becomes active without user intervention.
 
 Phase 2 requires its own approved implementation-plan section before implementation.
 
