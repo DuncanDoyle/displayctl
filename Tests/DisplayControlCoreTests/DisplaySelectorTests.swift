@@ -8,6 +8,15 @@ final class DisplaySelectorTests: XCTestCase {
         XCTAssertEqual(try DisplaySelector.resolve(display.uuid.uuidString, in: [display]), display)
     }
 
+    func testRejectsNonCanonicalLowercaseUUID() {
+        let display = fixture(id: 1, kind: .internal)
+        let selector = display.uuid.uuidString.lowercased()
+
+        XCTAssertThrowsError(try DisplaySelector.resolve(selector, in: [display])) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(selector))
+        }
+    }
+
     func testResolvesDecimalRuntimeID() throws {
         let display = fixture(id: 2, kind: .external)
 
@@ -73,7 +82,7 @@ final class DisplaySelectorTests: XCTestCase {
         name: String = "Fixture Display"
     ) -> Display {
         let uuids: [UInt32: UUID] = [
-            1: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            1: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
             2: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
             3: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
         ]

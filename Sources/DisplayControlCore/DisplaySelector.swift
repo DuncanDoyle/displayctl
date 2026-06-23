@@ -1,5 +1,3 @@
-import Foundation
-
 public enum DisplaySelector {
     public static func resolve(_ selector: String, in displays: [Display]) throws -> Display {
         if selector == DisplayKind.internal.rawValue {
@@ -10,8 +8,7 @@ public enum DisplaySelector {
             return try resolveAlias(selector, kind: .external, in: displays)
         }
 
-        if let uuid = UUID(uuidString: selector),
-           let display = displays.first(where: { $0.uuid == uuid }) {
+        if let display = displays.first(where: { $0.uuid.uuidString == selector }) {
             return display
         }
 
