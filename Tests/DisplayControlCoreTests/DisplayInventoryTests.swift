@@ -54,6 +54,27 @@ final class DisplayInventoryTests: XCTestCase {
         XCTAssertEqual(result.first { $0.runtimeID == 2 }?.isActive, false)
     }
 
+    func testMetadataInactiveOverridesActiveListMembership() throws {
+        var displayMetadata = metadata()
+        displayMetadata[1] = DisplayMetadata(
+            uuid: internalUUID,
+            isBuiltIn: true,
+            isActive: false,
+            isMain: true,
+            vendorNumber: 0,
+            modelNumber: 0,
+            localizedName: "Internal Panel"
+        )
+
+        let result = try DisplayInventory.makeDisplays(
+            onlineIDs: [1],
+            activeIDs: [1],
+            metadata: displayMetadata
+        )
+
+        XCTAssertEqual(result.first?.isActive, false)
+    }
+
     func testUsesFallbackNamesWhenLocalizedNamesAreUnavailable() throws {
         let result = try DisplayInventory.makeDisplays(
             onlineIDs: [1, 2],
@@ -85,6 +106,7 @@ final class DisplayInventoryTests: XCTestCase {
                 1: DisplayMetadata(
                     uuid: internalUUID,
                     isBuiltIn: true,
+                    isActive: true,
                     isMain: true,
                     vendorNumber: 0,
                     modelNumber: 0,
@@ -93,6 +115,7 @@ final class DisplayInventoryTests: XCTestCase {
                 2: DisplayMetadata(
                     uuid: externalUUID,
                     isBuiltIn: false,
+                    isActive: true,
                     isMain: false,
                     vendorNumber: 610,
                     modelNumber: 0x1234,
@@ -101,6 +124,7 @@ final class DisplayInventoryTests: XCTestCase {
                 3: DisplayMetadata(
                     uuid: lowerExternalUUID,
                     isBuiltIn: false,
+                    isActive: true,
                     isMain: false,
                     vendorNumber: 1,
                     modelNumber: 2,
@@ -129,6 +153,7 @@ final class DisplayInventoryTests: XCTestCase {
             1: DisplayMetadata(
                 uuid: internalUUID,
                 isBuiltIn: true,
+                isActive: true,
                 isMain: true,
                 vendorNumber: 0,
                 modelNumber: 0,
@@ -137,6 +162,7 @@ final class DisplayInventoryTests: XCTestCase {
             2: DisplayMetadata(
                 uuid: externalUUID,
                 isBuiltIn: false,
+                isActive: true,
                 isMain: false,
                 vendorNumber: 610,
                 modelNumber: 0x1234,

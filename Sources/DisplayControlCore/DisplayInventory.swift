@@ -10,6 +10,7 @@ public protocol DisplaySnapshotProviding: Sendable {
 struct DisplayMetadata: Sendable {
     let uuid: UUID
     let isBuiltIn: Bool
+    let isActive: Bool
     let isMain: Bool
     let vendorNumber: UInt32
     let modelNumber: UInt32
@@ -46,6 +47,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
             metadata[displayID] = DisplayMetadata(
                 uuid: uuid,
                 isBuiltIn: CGDisplayIsBuiltin(displayID) != 0,
+                isActive: CGDisplayIsActive(displayID) != 0,
                 isMain: CGDisplayIsMain(displayID) != 0,
                 vendorNumber: CGDisplayVendorNumber(displayID),
                 modelNumber: CGDisplayModelNumber(displayID),
@@ -73,7 +75,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
                 )
             }
 
-            let isActive = activeIDSet.contains(displayID)
+            let isActive = activeIDSet.contains(displayID) && displayMetadata.isActive
             let kind: DisplayKind = displayMetadata.isBuiltIn ? .internal : .external
             let fallbackName = displayMetadata.isBuiltIn
                 ? "Built-in Display"
