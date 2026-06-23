@@ -242,7 +242,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
 }
 ```
 
-The live implementation must call `CGGetOnlineDisplayList` and `CGGetActiveDisplayList` twice each: once for count and once for values. For every online ID, use `CGDisplayCreateUUIDFromDisplayID`, `CGDisplayIsBuiltin`, `CGDisplayIsActive`, and `CGDisplayIsMain`. Use `NSScreen.localizedName` when an active screen matches `NSScreenNumber`; otherwise use `Built-in Display` or `External Display <vendor>:<model>` from Core Graphics numeric metadata. Sort internal first, then UUID text.
+The live implementation must call `CGGetOnlineDisplayList` and `CGGetActiveDisplayList` for count and values, then verify the count; when topology changes make the capacity, returned count, and verified count incoherent, retry from the count call with bounded attempts. For every online ID, use `CGDisplayCreateUUIDFromDisplayID`, `CGDisplayIsBuiltin`, `CGDisplayIsActive`, and `CGDisplayIsMain`. Use `NSScreen.localizedName` when an active screen matches `NSScreenNumber`; otherwise use `Built-in Display` or `External Display <vendor>:<model>` from Core Graphics numeric metadata. Sort internal first, then UUID text.
 
 - [ ] **Step 4: Run inventory and full tests**
 
