@@ -133,7 +133,7 @@ git commit -m "build: scaffold display control package"
 
 - [ ] **Step 1: Add failing selector tests**
 
-Cover UUID, runtime ID, unique aliases, ambiguous `external`, missing selectors, and command-specific active-state validation. Use fixtures with fixed UUID strings and runtime IDs `1`, `2`, and `3`.
+Cover UUID, runtime ID, unique aliases, ambiguous identities and aliases, and missing selectors. Command-specific active-state validation is tested with `ConnectionController` in Task 5. Use fixtures with fixed UUID strings and runtime IDs `1`, `2`, and `3`.
 
 ```swift
 func testExternalAliasRejectsMultipleExternalDisplays() throws {

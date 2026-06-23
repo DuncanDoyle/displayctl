@@ -8,6 +8,16 @@ final class DisplaySelectorTests: XCTestCase {
         XCTAssertEqual(try DisplaySelector.resolve(display.uuid.uuidString, in: [display]), display)
     }
 
+    func testRejectsDuplicateUUIDMatchesAsAmbiguous() {
+        let first = fixture(id: 1, kind: .internal)
+        let second = fixture(id: 2, kind: .external, uuid: first.uuid)
+        let selector = first.uuid.uuidString
+
+        XCTAssertThrowsError(try DisplaySelector.resolve(selector, in: [first, second])) {
+            XCTAssertEqual($0 as? DisplayControlError, .ambiguousSelector(selector))
+        }
+    }
+
     func testRejectsNonCanonicalLowercaseUUID() {
         let display = fixture(id: 1, kind: .internal)
         let selector = display.uuid.uuidString.lowercased()
@@ -21,6 +31,16 @@ final class DisplaySelectorTests: XCTestCase {
         let display = fixture(id: 2, kind: .external)
 
         XCTAssertEqual(try DisplaySelector.resolve("2", in: [display]), display)
+    }
+
+    func testRejectsDuplicateRuntimeIDMatchesAsAmbiguous() {
+        let first = fixture(id: 2, kind: .external)
+        let second = fixture(id: 3, kind: .external, runtimeID: first.runtimeID)
+        let selector = String(first.runtimeID)
+
+        XCTAssertThrowsError(try DisplaySelector.resolve(selector, in: [first, second])) {
+            XCTAssertEqual($0 as? DisplayControlError, .ambiguousSelector(selector))
+        }
     }
 
     func testInternalAliasResolvesUniqueInternalDisplay() throws {
@@ -50,6 +70,14 @@ final class DisplaySelectorTests: XCTestCase {
         }
     }
 
+    func testInternalAliasRejectsMultipleInternalDisplays() {
+        let displays = [fixture(id: 1, kind: .internal), fixture(id: 2, kind: .internal)]
+
+        XCTAssertThrowsError(try DisplaySelector.resolve("internal", in: displays)) {
+            XCTAssertEqual($0 as? DisplayControlError, .ambiguousSelector("internal"))
+        }
+    }
+
     func testMissingAliasRejectsSelector() {
         XCTAssertThrowsError(try DisplaySelector.resolve("internal", in: [])) {
             XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("internal"))
@@ -59,6 +87,48 @@ final class DisplaySelectorTests: XCTestCase {
     func testMissingSelectorIsRejected() {
         XCTAssertThrowsError(try DisplaySelector.resolve("unknown", in: [])) {
             XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("unknown"))
+        }
+    }
+
+    func testMissingNumericRuntimeIDIsRejected() {
+        let displays = [fixture(id: 1, kind: .internal), fixture(id: 2, kind: .external)]
+
+        XCTAssertThrowsError(try DisplaySelector.resolve("3", in: displays)) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("3"))
+        }
+    }
+
+    func testUInt32OverflowSelectorIsRejected() {
+        let selector = "4294967296"
+
+        XCTAssertThrowsError(try DisplaySelector.resolve(selector, in: [])) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(selector))
+        }
+    }
+
+    func testNonDecimalNumericLikeSelectorIsRejected() {
+        let selector = "0x2"
+
+        XCTAssertThrowsError(try DisplaySelector.resolve(selector, in: [fixture(id: 2, kind: .external)])) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(selector))
+        }
+    }
+
+    func testAllSelectorIsRejected() {
+        XCTAssertThrowsError(try DisplaySelector.resolve("all", in: [fixture(id: 2, kind: .external)])) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("all"))
+        }
+    }
+
+    func testDifferentlyCasedInternalAliasIsRejected() {
+        XCTAssertThrowsError(try DisplaySelector.resolve("Internal", in: [fixture(id: 1, kind: .internal)])) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("Internal"))
+        }
+    }
+
+    func testDifferentlyCasedExternalAliasIsRejected() {
+        XCTAssertThrowsError(try DisplaySelector.resolve("EXTERNAL", in: [fixture(id: 2, kind: .external)])) {
+            XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("EXTERNAL"))
         }
     }
 
@@ -79,7 +149,9 @@ final class DisplaySelectorTests: XCTestCase {
     private func fixture(
         id: UInt32,
         kind: DisplayKind,
-        name: String = "Fixture Display"
+        name: String = "Fixture Display",
+        uuid: UUID? = nil,
+        runtimeID: UInt32? = nil
     ) -> Display {
         let uuids: [UInt32: UUID] = [
             1: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
@@ -88,8 +160,8 @@ final class DisplaySelectorTests: XCTestCase {
         ]
 
         return Display(
-            uuid: uuids[id]!,
-            runtimeID: id,
+            uuid: uuid ?? uuids[id]!,
+            runtimeID: runtimeID ?? id,
             name: name,
             kind: kind,
             isOnline: true,
