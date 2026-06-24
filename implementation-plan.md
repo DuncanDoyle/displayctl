@@ -332,7 +332,7 @@ git commit -m "feat: isolate private display APIs"
 
 - [ ] **Step 1: Write failing controller tests**
 
-Use fake snapshots and a fake transaction adapter. Test connect, disconnect, already-active/inactive rejection, last-active protection, begin failure, enable failure with cancellation, complete failure, and refreshed-state postcondition failure.
+Use fake snapshots, a fake cross-process operation lock, and a fake transaction adapter. Test connect, disconnect, already-active/inactive rejection, last-active protection, concurrent disconnect serialization, lock timeout/failure, begin failure, enable failure with cancellation, complete failure, cancellation failure diagnostics, refreshed-state read failure, duplicate-UUID postcondition rejection, and refreshed-state postcondition failure. Test that `connectAll` is idempotent when a candidate becomes active before its turn and still attempts all remaining candidates.
 
 ```swift
 func testDisconnectRefusesLastActiveDisplayBeforeBeginningTransaction() throws {
@@ -361,13 +361,18 @@ public protocol DisplayConnectionHardware: Sendable {
 }
 
 public struct ConnectionController: Sendable {
+    public init(snapshot: any DisplaySnapshotProviding, hardware: any DisplayConnectionHardware)
     public func connect(_ selector: String) throws -> Display
     public func connectAll() throws -> [Result<Display, DisplayControlError>]
     public func disconnect(_ selector: String) throws -> Display
 }
 ```
 
-The live adapter must call `CGBeginDisplayConfiguration`, the dynamically resolved `CGSConfigureDisplayEnabled`, and `CGCompleteDisplayConfiguration(config, .forSession)`. Call `CGCancelDisplayConfiguration` on every failure after a successful begin and before successful completion. Refresh the snapshot and require the selected UUID to have the requested active state before returning success.
+The controller's public initializer uses a per-user Darwin `flock` implementation stored in the user's temporary directory; an internal initializer injects the lock for tests. Hold the lock across the complete snapshot, selection, last-active validation, hardware transaction, and postcondition verification sequence. Use bounded nonblocking acquisition retries and map acquisition failure or timeout to a descriptive `configurationFailed`. Keep `connectAll` under one lock and use internal non-locking helpers to avoid recursive acquisition.
+
+The live adapter must call `CGBeginDisplayConfiguration`, the dynamically resolved `CGSConfigureDisplayEnabled`, and `CGCompleteDisplayConfiguration(config, .forSession)`. Call `CGCancelDisplayConfiguration` on every failure after a successful begin and before successful completion. If cancellation also fails, preserve both failures in the reported diagnostic. Tests must verify that enable, complete, and cancel receive the exact configuration returned by begin and that completion uses `.forSession`.
+
+After hardware completion, wrap snapshot failures as `postconditionFailed` because final state is unknown. Require exactly one refreshed display with the selected UUID and the requested active state. Make `connectAll` recovery idempotent by treating a candidate that is already active when re-resolved as success.
 
 - [ ] **Step 4: Verify controller behavior**
 

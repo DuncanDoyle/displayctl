@@ -127,18 +127,22 @@ Ambiguous or missing selections produce explicit errors. State validation is com
 
 Connection changes use this sequence:
 
-1. Refresh the display inventory.
-2. Resolve the requested display.
-3. Validate the requested transition.
-4. For disconnect, prove that another active display will remain.
-5. Begin a Core Graphics display configuration transaction.
-6. Invoke `CGSConfigureDisplayEnabled` through the private bridge.
-7. Complete the transaction for the current login session.
-8. Refresh inventory and verify the expected postcondition.
+1. Acquire the per-user, cross-process display-operation lock.
+2. Refresh the display inventory.
+3. Resolve the requested display.
+4. Validate the requested transition.
+5. For disconnect, prove that another active display will remain.
+6. Begin a Core Graphics display configuration transaction.
+7. Invoke `CGSConfigureDisplayEnabled` through the private bridge.
+8. Complete the transaction for the current login session.
+9. Refresh inventory and verify the expected postcondition unambiguously.
+10. Release the display-operation lock.
 
 If configuration fails before completion, the transaction is cancelled. Session-scoped changes intentionally revert after logout/login, providing a recovery boundary without requiring a long-running process.
 
-There is no force option for disconnecting the final active display.
+The operation lock uses Darwin `flock` on a lock file in the logged-in user's temporary directory. It serializes the complete validation and mutation sequence across threads, controller instances, and CLI processes. Acquisition uses bounded waiting and fails clearly rather than hanging indefinitely. The operating system releases the advisory lock when a process exits or crashes.
+
+There is no force option for disconnecting the final active display. `connect all` is idempotent: a candidate that becomes active before its turn is treated as a successful recovery.
 
 ### 6.4 DDC service matching
 
@@ -220,6 +224,7 @@ The core distinguishes at least these failure categories:
 Safety rules:
 
 - Never disconnect the last active display.
+- Serialize display connection operations across CLI processes so concurrent commands cannot bypass last-display validation.
 - Never expose a force override in Phase 1.
 - Never send DDC traffic to an ambiguous service match.
 - Never report success until the requested state is verified.
