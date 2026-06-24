@@ -83,13 +83,16 @@ final class DDCTests: XCTestCase {
     )
   }
 
-  func testControllerHandlesZeroReportedMaximumWithoutDivision() async throws {
+  func testControllerRejectsZeroReportedMaximumWithoutWriting() async {
     let transport = FakeDDCTransport(readResults: [.success(DDCValue(current: 0, maximum: 0))])
     let controller = makeController(transport: transport)
 
-    try await controller.set(percent: 73, display: externalDisplay())
-
-    XCTAssertEqual(transport.operations.last, .write(0x10, 0, externalDisplay()))
+    await assertThrowsError(try await controller.set(percent: 73, display: externalDisplay())) {
+      guard case .ddcInvalidResponse = $0 as? DisplayControlError else {
+        return XCTFail("Expected ddcInvalidResponse, got \($0)")
+      }
+    }
+    XCTAssertEqual(transport.operations, [.read(0x10, externalDisplay())])
   }
 
   func testControllerUsesMaximum100OnlyWhenReadIsUnsupported() async throws {
@@ -333,6 +336,96 @@ final class DDCTests: XCTestCase {
     }
   }
 
+  func testIOReturnUnsupportedEnablesSetFallbackWithoutRetry() async throws {
+    let mappedError = try XCTUnwrap(
+      DDCIOReturnMapper.error(
+        for: kIOReturnUnsupported,
+        api: "IOAVServiceReadI2C",
+        display: externalDisplay()
+      )
+    )
+    XCTAssertEqual(mappedError, .ddcUnsupported)
+
+    let transport = FakeDDCTransport(readResults: [.failure(mappedError)])
+    let controller = makeController(transport: transport)
+    try await controller.set(percent: 42, display: externalDisplay())
+
+    XCTAssertEqual(
+      transport.operations,
+      [.read(0x10, externalDisplay()), .write(0x10, 42, externalDisplay())]
+    )
+  }
+
+  func testEndpointIndexExtractionIsExactAndCaseInsensitive() {
+    XCTAssertEqual(DDCEndpointIndex.extract(from: ["DCPEXT0"], prefix: "dcpext"), 0)
+    XCTAssertEqual(DDCEndpointIndex.extract(from: ["dispext12"], prefix: "dispext"), 12)
+    XCTAssertNil(DDCEndpointIndex.extract(from: ["dcpext"], prefix: "dcpext"))
+    XCTAssertNil(DDCEndpointIndex.extract(from: ["dcpext0-extra"], prefix: "dcpext"))
+    XCTAssertNil(DDCEndpointIndex.extract(from: ["dcpext0", "dcpext1"], prefix: "dcpext"))
+  }
+
+  func testTopologyPairerMapsExactEndpointZero() {
+    let candidates = DDCRegistryTopologyPairer.candidates(
+      proxies: [proxyRecord(id: 10, endpointIndex: 0)],
+      framebuffers: [framebufferRecord(endpointIndex: 0, productName: "DISPLAY ZERO")]
+    )
+
+    XCTAssertEqual(candidates.first?.serviceID, 10)
+    XCTAssertEqual(candidates.first?.productName, "DISPLAY ZERO")
+  }
+
+  func testTopologyPairerMapsMultipleEndpointIndicesWithoutCrossPairing() {
+    let candidates = DDCRegistryTopologyPairer.candidates(
+      proxies: [proxyRecord(id: 10, endpointIndex: 0), proxyRecord(id: 11, endpointIndex: 1)],
+      framebuffers: [
+        framebufferRecord(endpointIndex: 1, productName: "DISPLAY ONE"),
+        framebufferRecord(endpointIndex: 0, productName: "DISPLAY ZERO"),
+      ]
+    )
+
+    XCTAssertEqual(candidates.first { $0.serviceID == 10 }?.productName, "DISPLAY ZERO")
+    XCTAssertEqual(candidates.first { $0.serviceID == 11 }?.productName, "DISPLAY ONE")
+  }
+
+  func testTopologyPairerLeavesMissingAndMismatchedEndpointMetadataEmpty() {
+    let candidates = DDCRegistryTopologyPairer.candidates(
+      proxies: [proxyRecord(id: 10, endpointIndex: nil), proxyRecord(id: 11, endpointIndex: 1)],
+      framebuffers: [framebufferRecord(endpointIndex: 0, productName: "WRONG DISPLAY")]
+    )
+
+    XCTAssertTrue(candidates.allSatisfy { $0.productName == nil && $0.serial == nil })
+  }
+
+  func testTopologyPairerRejectsDuplicateEndpointAmbiguity() {
+    let duplicateProxies = DDCRegistryTopologyPairer.candidates(
+      proxies: [proxyRecord(id: 10, endpointIndex: 0), proxyRecord(id: 11, endpointIndex: 0)],
+      framebuffers: [framebufferRecord(endpointIndex: 0, productName: "DISPLAY ZERO")]
+    )
+    let duplicateFramebuffers = DDCRegistryTopologyPairer.candidates(
+      proxies: [proxyRecord(id: 12, endpointIndex: 1)],
+      framebuffers: [
+        framebufferRecord(endpointIndex: 1, productName: "FIRST"),
+        framebufferRecord(endpointIndex: 1, productName: "SECOND"),
+      ]
+    )
+
+    XCTAssertTrue(duplicateProxies.allSatisfy { $0.productName == nil })
+    XCTAssertTrue(duplicateFramebuffers.allSatisfy { $0.productName == nil })
+  }
+
+  func testRegistryServiceSelectorSkipsUnreadableIDsBeforeTarget() {
+    XCTAssertEqual(
+      DDCRegistryServiceSelector.firstMatchingIndex(
+        expectedID: 77,
+        entries: [
+          DDCRegistryServiceDescriptor(serviceID: nil, className: "DCPAVServiceProxy"),
+          DDCRegistryServiceDescriptor(serviceID: 77, className: "DCPAVServiceProxy"),
+        ]
+      ),
+      1
+    )
+  }
+
   func testIOReturnMapperPreservesTransportContextAndRawCode() {
     XCTAssertEqual(
       DDCIOReturnMapper.error(
@@ -475,6 +568,37 @@ final class DDCTests: XCTestCase {
     for conflict in conflicts {
       assertServiceNotFound(identity, candidates: [conflict])
     }
+  }
+
+  func testRejectsSharedSerialWhenVendorProductPairsConflict() {
+    let identity = sparseIdentity(serial: "GENERIC-SERIAL")
+    let display = DDCDisplayIdentity(
+      edidUUID: identity.edidUUID,
+      productName: identity.productName,
+      serial: identity.serial,
+      displayLocation: identity.displayLocation,
+      vendorID: 4268,
+      productID: 16816,
+      manufactureWeek: nil,
+      manufactureYear: nil,
+      physicalWidthMM: nil,
+      physicalHeightMM: nil
+    )
+    let collision = service(
+      id: 1,
+      edidUUID: nil,
+      productName: "Generic Display",
+      serial: "generic-serial",
+      displayLocation: nil,
+      vendorID: 1111,
+      productID: 2222,
+      manufactureWeek: nil,
+      manufactureYear: nil,
+      physicalWidthMM: nil,
+      physicalHeightMM: nil
+    )
+
+    assertServiceNotFound(display, candidates: [collision])
   }
 
   func testConflictFreeCandidateWinsRegardlessOfInputOrder() throws {
@@ -723,6 +847,31 @@ final class DDCTests: XCTestCase {
       isActive: true,
       isMain: true,
       ddcCapability: .unknown
+    )
+  }
+
+  private func proxyRecord(id: UInt64, endpointIndex: Int?) -> DDCRegistryProxyRecord {
+    DDCRegistryProxyRecord(
+      serviceID: id,
+      endpointIndex: endpointIndex,
+      properties: ["Location": "External", "Unit": 0]
+    )
+  }
+
+  private func framebufferRecord(
+    endpointIndex: Int?,
+    productName: String
+  ) -> DDCRegistryFramebufferRecord {
+    DDCRegistryFramebufferRecord(
+      endpointIndex: endpointIndex,
+      properties: [
+        "DisplayAttributes": [
+          "ProductAttributes": [
+            "ProductName": productName,
+            "SerialNumber": 1234,
+          ]
+        ]
+      ]
     )
   }
 

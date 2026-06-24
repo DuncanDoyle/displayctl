@@ -75,6 +75,9 @@ public actor DDCBrightnessController {
     } catch DisplayControlError.ddcUnsupported {
       maximum = 100
     }
+    guard maximum != 0 else {
+      throw DisplayControlError.ddcInvalidResponse("Brightness maximum is zero")
+    }
 
     let scaled = UInt16((UInt32(maximum) * UInt32(percent) + 50) / 100)
     try retrying {
@@ -362,6 +365,7 @@ enum DDCServiceMatcher {
       nonzeroConflict(candidate.displayLocation, display.displayLocation)
       || identityTokenConflict(candidate.serial, display.serial)
       || identityTokenConflict(candidate.edidUUID, display.edidUUID)
+      || vendorProductPairConflict(candidate, display)
     guard !hasConflict else { return false }
 
     return nonzeroEqual(candidate.displayLocation, display.displayLocation)
@@ -411,6 +415,23 @@ enum DDCServiceMatcher {
   private static func nonzeroConflict<T>(_ lhs: T?, _ rhs: T?) -> Bool where T: BinaryInteger {
     guard let lhs, let rhs, lhs != 0, rhs != 0 else { return false }
     return lhs != rhs
+  }
+
+  private static func vendorProductPairConflict(
+    _ candidate: DDCServiceCandidate,
+    _ display: DDCDisplayIdentity
+  ) -> Bool {
+    guard
+      let candidateVendor = candidate.vendorID,
+      let candidateProduct = candidate.productID,
+      let displayVendor = display.vendorID,
+      let displayProduct = display.productID,
+      candidateVendor != 0,
+      candidateProduct != 0,
+      displayVendor != 0,
+      displayProduct != 0
+    else { return false }
+    return candidateVendor != displayVendor || candidateProduct != displayProduct
   }
 }
 
@@ -487,6 +508,106 @@ enum DDCRegistryMetadataParser {
   }
 }
 
+struct DDCRegistryProxyRecord {
+  let serviceID: UInt64
+  let endpointIndex: Int?
+  let properties: [String: Any]
+}
+
+struct DDCRegistryFramebufferRecord {
+  let endpointIndex: Int?
+  let properties: [String: Any]
+}
+
+enum DDCEndpointIndex {
+  static func extract(from names: [String], prefix: String) -> Int? {
+    let normalizedPrefix = prefix.lowercased()
+    let indices = Set(
+      names.compactMap { name -> Int? in
+        let normalizedName = name.lowercased()
+        guard normalizedName.hasPrefix(normalizedPrefix) else { return nil }
+        let suffix = normalizedName.dropFirst(normalizedPrefix.count)
+        guard !suffix.isEmpty, suffix.allSatisfy(\.isNumber) else { return nil }
+        return Int(suffix)
+      }
+    )
+    guard indices.count == 1 else { return nil }
+    return indices.first
+  }
+}
+
+enum DDCRegistryTopologyPairer {
+  static func candidates(
+    proxies: [DDCRegistryProxyRecord],
+    framebuffers: [DDCRegistryFramebufferRecord]
+  ) -> [DDCServiceCandidate] {
+    let proxiesByIndex = Dictionary(grouping: proxies.compactMap(indexedProxy), by: \.index)
+    let framebuffersByIndex = Dictionary(
+      grouping: framebuffers.compactMap(indexedFramebuffer),
+      by: \.index
+    )
+
+    return proxies.map { proxy in
+      let framebufferProperties: [String: Any]
+      if let index = proxy.endpointIndex,
+        proxiesByIndex[index]?.count == 1,
+        let matches = framebuffersByIndex[index],
+        matches.count == 1
+      {
+        framebufferProperties = matches[0].record.properties
+      } else {
+        framebufferProperties = [:]
+      }
+      return DDCRegistryMetadataParser.candidate(
+        serviceID: proxy.serviceID,
+        proxyProperties: proxy.properties,
+        framebufferProperties: framebufferProperties
+      )
+    }
+  }
+
+  private static func indexedProxy(
+    _ record: DDCRegistryProxyRecord
+  ) -> (index: Int, record: DDCRegistryProxyRecord)? {
+    guard let index = record.endpointIndex else { return nil }
+    return (index, record)
+  }
+
+  private static func indexedFramebuffer(
+    _ record: DDCRegistryFramebufferRecord
+  ) -> (index: Int, record: DDCRegistryFramebufferRecord)? {
+    guard let index = record.endpointIndex else { return nil }
+    return (index, record)
+  }
+}
+
+struct DDCRegistryServiceDescriptor {
+  let serviceID: UInt64?
+  let className: String
+}
+
+enum DDCRegistryServiceSelector {
+  static func firstMatchingIndex(
+    expectedID: UInt64,
+    entries: [DDCRegistryServiceDescriptor]
+  ) -> Int? {
+    entries.firstIndex {
+      $0.serviceID == expectedID && $0.className == IORegistryDDCServiceRegistry.proxyClass
+    }
+  }
+
+  static func isMatch(
+    expectedID: UInt64,
+    serviceID: UInt64?,
+    className: String
+  ) -> Bool {
+    firstMatchingIndex(
+      expectedID: expectedID,
+      entries: [DDCRegistryServiceDescriptor(serviceID: serviceID, className: className)]
+    ) != nil
+  }
+}
+
 struct IORegistryDDCServiceResolver: DDCServiceResolving {
   private let registry = IORegistryDDCServiceRegistry()
 
@@ -499,7 +620,7 @@ struct IORegistryDDCServiceResolver: DDCServiceResolving {
 }
 
 final class IORegistryDDCServiceRegistry: @unchecked Sendable {
-  private static let proxyClass = "DCPAVServiceProxy"
+  static let proxyClass = "DCPAVServiceProxy"
   private static let framebufferClasses: Set<String> = [
     "IOMobileFramebufferShim",
     "AppleCLCD2",
@@ -509,11 +630,15 @@ final class IORegistryDDCServiceRegistry: @unchecked Sendable {
     let iterator = try makeIterator(operation: "enumerate DDC services")
     defer { IOObjectRelease(iterator) }
 
-    var candidates: [DDCServiceCandidate] = []
+    var proxies: [DDCRegistryProxyRecord] = []
+    var framebuffers: [DDCRegistryFramebufferRecord] = []
     while case let entry = IOIteratorNext(iterator), entry != IO_OBJECT_NULL {
       do {
-        if let candidate = try candidate(from: entry) {
-          candidates.append(candidate)
+        let entryClass = className(of: entry)
+        if entryClass == Self.proxyClass {
+          proxies.append(try proxyRecord(from: entry))
+        } else if Self.framebufferClasses.contains(entryClass) {
+          framebuffers.append(framebufferRecord(from: entry))
         }
       } catch {
         IOObjectRelease(entry)
@@ -521,22 +646,38 @@ final class IORegistryDDCServiceRegistry: @unchecked Sendable {
       }
       IOObjectRelease(entry)
     }
-    return candidates
+    return DDCRegistryTopologyPairer.candidates(
+      proxies: proxies,
+      framebuffers: framebuffers
+    )
   }
 
-  private func candidate(from entry: io_registry_entry_t) throws -> DDCServiceCandidate? {
-    guard className(of: entry) == Self.proxyClass else { return nil }
-
+  private func proxyRecord(from entry: io_registry_entry_t) throws -> DDCRegistryProxyRecord {
     var serviceID: UInt64 = 0
     let idResult = IORegistryEntryGetRegistryEntryID(entry, &serviceID)
     guard idResult == KERN_SUCCESS else {
       throw transportError("read registry entry ID", result: idResult)
     }
 
-    return DDCRegistryMetadataParser.candidate(
+    return DDCRegistryProxyRecord(
       serviceID: serviceID,
-      proxyProperties: properties(of: entry, keys: ["Location", "Unit"]),
-      framebufferProperties: nearestFramebufferProperties(under: entry) ?? [:]
+      endpointIndex: DDCEndpointIndex.extract(
+        from: ancestorNames(of: entry),
+        prefix: "dcpext"
+      ),
+      properties: properties(of: entry, keys: ["Location", "Unit"])
+    )
+  }
+
+  private func framebufferRecord(
+    from entry: io_registry_entry_t
+  ) -> DDCRegistryFramebufferRecord {
+    DDCRegistryFramebufferRecord(
+      endpointIndex: DDCEndpointIndex.extract(
+        from: ancestorNames(of: entry),
+        prefix: "dispext"
+      ),
+      properties: properties(of: entry, keys: ["EDID UUID", "DisplayAttributes"])
     )
   }
 
@@ -547,14 +688,15 @@ final class IORegistryDDCServiceRegistry: @unchecked Sendable {
     while case let entry = IOIteratorNext(iterator), entry != IO_OBJECT_NULL {
       var serviceID: UInt64 = 0
       let idResult = IORegistryEntryGetRegistryEntryID(entry, &serviceID)
-      if idResult == KERN_SUCCESS, serviceID == expectedID, className(of: entry) == Self.proxyClass
-      {
+      let observedID = idResult == KERN_SUCCESS ? serviceID : nil
+      if DDCRegistryServiceSelector.isMatch(
+        expectedID: expectedID,
+        serviceID: observedID,
+        className: className(of: entry)
+      ) {
         return entry
       }
       IOObjectRelease(entry)
-      if idResult != KERN_SUCCESS {
-        throw transportError("read registry entry ID", result: idResult)
-      }
     }
     throw DisplayControlError.ddcServiceNotFound
   }
@@ -573,7 +715,8 @@ final class IORegistryDDCServiceRegistry: @unchecked Sendable {
     return iterator
   }
 
-  private func nearestFramebufferProperties(under entry: io_registry_entry_t) -> [String: Any]? {
+  private func ancestorNames(of entry: io_registry_entry_t) -> [String] {
+    var names: [String] = []
     var current = entry
 
     while true {
@@ -582,16 +725,23 @@ final class IORegistryDDCServiceRegistry: @unchecked Sendable {
       if current != entry {
         IOObjectRelease(current)
       }
-      guard result == KERN_SUCCESS, parent != IO_OBJECT_NULL else { return nil }
+      guard result == KERN_SUCCESS, parent != IO_OBJECT_NULL else { return names }
       current = parent
+      if let name = entryName(of: current) {
+        names.append(name)
+      }
+    }
+  }
 
-      guard Self.framebufferClasses.contains(className(of: current)) else { continue }
-      let framebufferProperties = properties(
-        of: current,
-        keys: ["EDID UUID", "DisplayAttributes"]
-      )
-      IOObjectRelease(current)
-      return framebufferProperties
+  private func entryName(of entry: io_registry_entry_t) -> String? {
+    var name = [CChar](repeating: 0, count: MemoryLayout<io_name_t>.size)
+    let result = name.withUnsafeMutableBufferPointer { buffer in
+      IORegistryEntryGetName(entry, buffer.baseAddress)
+    }
+    guard result == KERN_SUCCESS else { return nil }
+    return name.withUnsafeBufferPointer { buffer in
+      guard let baseAddress = buffer.baseAddress else { return nil }
+      return String(cString: baseAddress)
     }
   }
 
@@ -626,6 +776,9 @@ enum DDCIOReturnMapper {
     display: Display
   ) -> DisplayControlError? {
     guard result != kIOReturnSuccess else { return nil }
+    if result == kIOReturnUnsupported {
+      return .ddcUnsupported
+    }
     if result == kIOReturnTimeout || result == kIOReturnNotResponding {
       return .ddcTimeout
     }
