@@ -97,7 +97,8 @@ confirm_observed() {
   if [[ "$answer" == "YES" ]]; then
     print -- "Recorded user confirmation: $description"
   else
-    print -- "Not recorded as passed: $description"
+    print -u2 -- "Validation failed: exact YES was not received; aborting and running recovery."
+    return 1
   fi
 }
 
