@@ -1,8 +1,349 @@
+import IOKit
 import XCTest
 
 @testable import DisplayControlCore
 
 final class DDCTests: XCTestCase {
+  func testControllerGetReturnsBrightnessFromTransport() async throws {
+    let transport = FakeDDCTransport(readResults: [.success(DDCValue(current: 37, maximum: 200))])
+    let controller = makeController(transport: transport)
+
+    let value = try await controller.get(display: externalDisplay())
+    XCTAssertEqual(value, DDCValue(current: 37, maximum: 200))
+    XCTAssertEqual(transport.operations, [.read(0x10, externalDisplay())])
+  }
+
+  func testControllerSerializesTransportOperations() async throws {
+    let transport = FakeDDCTransport(
+      readResults: Array(repeating: .success(DDCValue(current: 1, maximum: 100)), count: 8),
+      operationDelay: 0.01
+    )
+    let controller = makeController(transport: transport)
+    let display = externalDisplay()
+
+    try await withThrowingTaskGroup(of: Void.self) { group in
+      for _ in 0..<8 {
+        group.addTask {
+          _ = try await controller.get(display: display)
+        }
+      }
+      try await group.waitForAll()
+    }
+
+    XCTAssertEqual(transport.maximumConcurrentOperations, 1)
+  }
+
+  func testControllerRejectsInternalDisplayWithoutUsingTransport() async {
+    let transport = FakeDDCTransport()
+    let controller = makeController(transport: transport)
+
+    await assertThrowsError(try await controller.get(display: internalDisplay())) {
+      guard case .invalidArguments = $0 as? DisplayControlError else {
+        return XCTFail("Expected invalidArguments, got \($0)")
+      }
+    }
+    XCTAssertTrue(transport.operations.isEmpty)
+  }
+
+  func testControllerRejectsPercentOutsideClosedRange() async {
+    for percent in [-1, 101] {
+      let transport = FakeDDCTransport()
+      let controller = makeController(transport: transport)
+
+      await assertThrowsError(
+        try await controller.set(percent: percent, display: externalDisplay())
+      ) {
+        guard case .invalidArguments = $0 as? DisplayControlError else {
+          return XCTFail("Expected invalidArguments, got \($0)")
+        }
+      }
+      XCTAssertTrue(transport.operations.isEmpty)
+    }
+  }
+
+  func testControllerScalesPercentToReportedMaximum() async throws {
+    let transport = FakeDDCTransport(readResults: [.success(DDCValue(current: 0, maximum: 255))])
+    let controller = makeController(transport: transport)
+
+    try await controller.set(percent: 50, display: externalDisplay())
+
+    XCTAssertEqual(
+      transport.operations,
+      [.read(0x10, externalDisplay()), .write(0x10, 128, externalDisplay())]
+    )
+  }
+
+  func testControllerHandlesZeroReportedMaximumWithoutDivision() async throws {
+    let transport = FakeDDCTransport(readResults: [.success(DDCValue(current: 0, maximum: 0))])
+    let controller = makeController(transport: transport)
+
+    try await controller.set(percent: 73, display: externalDisplay())
+
+    XCTAssertEqual(transport.operations.last, .write(0x10, 0, externalDisplay()))
+  }
+
+  func testControllerUsesMaximum100OnlyWhenReadIsUnsupported() async throws {
+    let transport = FakeDDCTransport(readResults: [.failure(.ddcUnsupported)])
+    let controller = makeController(transport: transport)
+
+    try await controller.set(percent: 42, display: externalDisplay())
+
+    XCTAssertEqual(transport.operations.last, .write(0x10, 42, externalDisplay()))
+  }
+
+  func testControllerDoesNotUseMaximumFallbackForOtherReadFailures() async {
+    let expected = DisplayControlError.ddcServiceNotFound
+    let transport = FakeDDCTransport(readResults: [.failure(expected)])
+    let controller = makeController(transport: transport)
+
+    await assertThrowsError(try await controller.set(percent: 42, display: externalDisplay())) {
+      XCTAssertEqual($0 as? DisplayControlError, expected)
+    }
+    XCTAssertFalse(
+      transport.operations.contains { operation in
+        if case .write = operation { return true }
+        return false
+      })
+  }
+
+  func testControllerRetriesRetryableFailuresWithinBound() async throws {
+    let retryableErrors: [DisplayControlError] = [
+      .ddcTimeout,
+      .ddcTransport("temporary transport failure"),
+      .ddcInvalidResponse("temporary malformed response"),
+    ]
+
+    for error in retryableErrors {
+      let transport = FakeDDCTransport(readResults: [
+        .failure(error), .success(DDCValue(current: 9, maximum: 100)),
+      ])
+      let controller = makeController(transport: transport)
+
+      let value = try await controller.get(display: externalDisplay())
+      XCTAssertEqual(value.current, 9)
+      XCTAssertEqual(transport.operations.count, 2)
+    }
+  }
+
+  func testControllerDoesNotRetryPermanentFailures() async {
+    let permanentErrors: [DisplayControlError] = [
+      .ddcUnsupported,
+      .ddcServiceNotFound,
+      .ddcServiceAmbiguous,
+      .invalidArguments("invalid display"),
+      .displayNotFound("missing display"),
+      .ambiguousSelector("ambiguous display"),
+    ]
+
+    for error in permanentErrors {
+      let transport = FakeDDCTransport(readResults: [.failure(error)])
+      let controller = makeController(transport: transport)
+
+      await assertThrowsError(try await controller.get(display: externalDisplay())) {
+        XCTAssertEqual($0 as? DisplayControlError, error)
+      }
+      XCTAssertEqual(transport.operations.count, 1)
+    }
+  }
+
+  func testControllerExposesWriteFailure() async {
+    let expected = DisplayControlError.ddcServiceNotFound
+    let transport = FakeDDCTransport(
+      readResults: [.success(DDCValue(current: 10, maximum: 100))],
+      writeResults: [.failure(expected)]
+    )
+    let controller = makeController(transport: transport)
+
+    await assertThrowsError(try await controller.set(percent: 20, display: externalDisplay())) {
+      XCTAssertEqual($0 as? DisplayControlError, expected)
+    }
+  }
+
+  func testControllerReturnsFinalTypedErrorWhenRetriesAreExhausted() async {
+    let first = DisplayControlError.ddcTimeout
+    let final = DisplayControlError.ddcTransport("final transport failure")
+    let transport = FakeDDCTransport(readResults: [.failure(first), .failure(final)])
+    let controller = DDCBrightnessController(
+      transport: transport,
+      retryPolicy: DDCRetryPolicy(maxAttempts: 2, delayMicroseconds: 0),
+      sleeper: { _ in }
+    )
+
+    await assertThrowsError(try await controller.get(display: externalDisplay())) {
+      XCTAssertEqual($0 as? DisplayControlError, final)
+    }
+    XCTAssertEqual(transport.operations.count, 2)
+  }
+
+  func testDisplayIdentityUsesSafeCGMetadataWithoutAssumingEDIDUUID() {
+    let identity = DDCDisplayIdentity(
+      display: externalDisplay(),
+      cgMetadata: DDCDisplayCGMetadata(
+        serialNumber: 1_113_146_188, vendorID: 4268, productID: 16816)
+    )
+
+    XCTAssertNil(identity.edidUUID)
+    XCTAssertEqual(identity.productName, "External Display")
+    XCTAssertEqual(identity.serial, "1113146188")
+    XCTAssertEqual(identity.vendorID, 4268)
+    XCTAssertEqual(identity.productID, 16816)
+    XCTAssertNil(identity.displayLocation)
+    XCTAssertNil(identity.manufactureWeek)
+    XCTAssertNil(identity.manufactureYear)
+  }
+
+  func testDisplayIdentityDoesNotCreateStrongSerialFromZero() {
+    let identity = DDCDisplayIdentity(
+      display: externalDisplay(),
+      cgMetadata: DDCDisplayCGMetadata(serialNumber: 0, vendorID: 0, productID: 0)
+    )
+
+    XCTAssertNil(identity.serial)
+    XCTAssertNil(identity.vendorID)
+    XCTAssertNil(identity.productID)
+  }
+
+  func testCandidateDetectorMarksUniqueExternalResolutionAsCandidate() {
+    let resolver = FakeDDCServiceResolver(result: .success(service(id: 7)))
+    let detector = ResolverDDCCandidateDetector(resolver: resolver)
+
+    XCTAssertEqual(detector.capability(for: externalDisplay()), .candidate)
+    XCTAssertEqual(resolver.displays, [externalDisplay()])
+  }
+
+  func testCandidateDetectorMapsNotFoundToUnsupported() {
+    let resolver = FakeDDCServiceResolver(result: .failure(.ddcServiceNotFound))
+    let detector = ResolverDDCCandidateDetector(resolver: resolver)
+
+    XCTAssertEqual(detector.capability(for: externalDisplay()), .unsupported)
+  }
+
+  func testCandidateDetectorMapsAmbiguityAndDiscoveryFailuresToUnknown() {
+    let errors: [DisplayControlError] = [
+      .ddcServiceAmbiguous,
+      .ddcTransport("registry unavailable"),
+      .unsupportedAPI("IOAVServiceCreateWithService"),
+    ]
+
+    for error in errors {
+      let detector = ResolverDDCCandidateDetector(
+        resolver: FakeDDCServiceResolver(result: .failure(error)))
+      XCTAssertEqual(detector.capability(for: externalDisplay()), .unknown)
+    }
+  }
+
+  func testCandidateDetectorLeavesInternalDisplayUnknownWithoutResolving() {
+    let resolver = FakeDDCServiceResolver(result: .failure(.ddcServiceNotFound))
+    let detector = ResolverDDCCandidateDetector(resolver: resolver)
+
+    XCTAssertEqual(detector.capability(for: internalDisplay()), .unknown)
+    XCTAssertTrue(resolver.displays.isEmpty)
+  }
+
+  func testInventoryCapabilityPassPreservesInternalAndClassifiesExternalDisplays() {
+    let detector = FakeDDCCandidateDetector(capabilities: [externalDisplay().uuid: .candidate])
+
+    let result = DisplayInventory.applyingDDCCapabilities(
+      to: [internalDisplay(), externalDisplay()],
+      detector: detector
+    )
+
+    XCTAssertEqual(result.first { $0.kind == .internal }?.ddcCapability, .unknown)
+    XCTAssertEqual(result.first { $0.kind == .external }?.ddcCapability, .candidate)
+    XCTAssertEqual(detector.displays, [externalDisplay()])
+  }
+
+  func testRegistryMetadataParserCapturesObservedExternalDisplayIdentity() {
+    let candidate = DDCRegistryMetadataParser.candidate(
+      serviceID: 99,
+      proxyProperties: ["Location": "External", "Unit": 0],
+      framebufferProperties: [
+        "EDID UUID": "10ACB041-0000-0000-0000-000000000000",
+        "DisplayAttributes": [
+          "PortID": 48,
+          "ProductAttributes": [
+            "ProductName": "DELL U2720Q",
+            "SerialNumber": 1_113_146_188,
+            "LegacyManufacturerID": 4268,
+            "ProductID": 16816,
+            "WeekOfManufacture": 20,
+            "YearOfManufacture": 2020,
+          ],
+          "MaxHorizontalImageSize": 60,
+          "MaxVerticalImageSize": 34,
+        ],
+      ]
+    )
+
+    XCTAssertEqual(
+      candidate,
+      DDCServiceCandidate(
+        serviceID: 99,
+        isExternal: true,
+        edidUUID: "10ACB041-0000-0000-0000-000000000000",
+        productName: "DELL U2720Q",
+        serial: "1113146188",
+        displayLocation: 48,
+        vendorID: 4268,
+        productID: 16816,
+        manufactureWeek: 20,
+        manufactureYear: 2020,
+        physicalWidthMM: 600,
+        physicalHeightMM: 340
+      )
+    )
+  }
+
+  func testRegistryMetadataParserLeavesMissingIdentityFieldsEmpty() {
+    let candidate = DDCRegistryMetadataParser.candidate(
+      serviceID: 7,
+      proxyProperties: ["Location": "External", "Unit": 0],
+      framebufferProperties: [:]
+    )
+
+    XCTAssertEqual(candidate.serviceID, 7)
+    XCTAssertTrue(candidate.isExternal)
+    XCTAssertNil(candidate.edidUUID)
+    XCTAssertNil(candidate.serial)
+    XCTAssertNil(candidate.displayLocation)
+    XCTAssertNil(candidate.vendorID)
+    XCTAssertNil(candidate.productID)
+  }
+
+  func testIOReturnMapperClassifiesIdentifiableTimeouts() {
+    for result in [kIOReturnTimeout, kIOReturnNotResponding] {
+      XCTAssertEqual(
+        DDCIOReturnMapper.error(
+          for: result,
+          api: "IOAVServiceReadI2C",
+          display: externalDisplay()
+        ),
+        .ddcTimeout
+      )
+    }
+  }
+
+  func testIOReturnMapperPreservesTransportContextAndRawCode() {
+    XCTAssertEqual(
+      DDCIOReturnMapper.error(
+        for: kIOReturnError,
+        api: "IOAVServiceWriteI2C",
+        display: externalDisplay()
+      ),
+      .ddcTransport(
+        "IOAVServiceWriteI2C failed with code \(kIOReturnError) for display 2 "
+          + "(22222222-2222-2222-2222-222222222222)"
+      )
+    )
+    XCTAssertNil(
+      DDCIOReturnMapper.error(
+        for: kIOReturnSuccess,
+        api: "IOAVServiceReadI2C",
+        display: externalDisplay()
+      )
+    )
+  }
+
   func testWriteVCPPackets() {
     XCTAssertEqual(DDCPacket.writeVCP(code: 0x10, value: 0), [0x84, 0x03, 0x10, 0x00, 0x00, 0xA8])
     XCTAssertEqual(DDCPacket.writeVCP(code: 0x10, value: 50), [0x84, 0x03, 0x10, 0x00, 0x32, 0x9A])
@@ -339,5 +680,151 @@ final class DDCTests: XCTestCase {
       physicalWidthMM: physicalWidthMM,
       physicalHeightMM: physicalHeightMM
     )
+  }
+
+  private func makeController(transport: FakeDDCTransport) -> DDCBrightnessController {
+    DDCBrightnessController(
+      transport: transport,
+      retryPolicy: DDCRetryPolicy(maxAttempts: 3, delayMicroseconds: 0),
+      sleeper: { _ in }
+    )
+  }
+
+  private func externalDisplay() -> Display {
+    Display(
+      uuid: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+      runtimeID: 2,
+      name: "External Display",
+      kind: .external,
+      isOnline: true,
+      isActive: true,
+      isMain: false,
+      ddcCapability: .candidate
+    )
+  }
+
+  private func internalDisplay() -> Display {
+    Display(
+      uuid: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
+      runtimeID: 1,
+      name: "Built-in Display",
+      kind: .internal,
+      isOnline: true,
+      isActive: true,
+      isMain: true,
+      ddcCapability: .unknown
+    )
+  }
+
+  private func assertThrowsError<T>(
+    _ expression: @autoclosure () async throws -> T,
+    _ handler: (Error) -> Void
+  ) async {
+    do {
+      _ = try await expression()
+      XCTFail("Expected expression to throw")
+    } catch {
+      handler(error)
+    }
+  }
+}
+
+private enum FakeDDCOperation: Equatable {
+  case read(UInt8, Display)
+  case write(UInt8, UInt16, Display)
+}
+
+private final class FakeDDCTransport: DDCTransport, @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedReadResults: [Result<DDCValue, DisplayControlError>]
+  private var storedWriteResults: [Result<Void, DisplayControlError>]
+  private var storedOperations: [FakeDDCOperation] = []
+  private var concurrentOperations = 0
+  private var storedMaximumConcurrentOperations = 0
+  private let operationDelay: TimeInterval
+
+  init(
+    readResults: [Result<DDCValue, DisplayControlError>] = [],
+    writeResults: [Result<Void, DisplayControlError>] = [],
+    operationDelay: TimeInterval = 0
+  ) {
+    storedReadResults = readResults
+    storedWriteResults = writeResults
+    self.operationDelay = operationDelay
+  }
+
+  var operations: [FakeDDCOperation] {
+    lock.withLock { storedOperations }
+  }
+
+  var maximumConcurrentOperations: Int {
+    lock.withLock { storedMaximumConcurrentOperations }
+  }
+
+  func readVCP(_ code: UInt8, for display: Display) throws -> DDCValue {
+    try perform(
+      .read(code, display), results: &storedReadResults,
+      defaultValue: DDCValue(current: 0, maximum: 100))
+  }
+
+  func writeVCP(_ code: UInt8, value: UInt16, for display: Display) throws {
+    try perform(.write(code, value, display), results: &storedWriteResults, defaultValue: ())
+  }
+
+  private func perform<T>(
+    _ operation: FakeDDCOperation,
+    results: inout [Result<T, DisplayControlError>],
+    defaultValue: T
+  ) throws -> T {
+    let result: Result<T, DisplayControlError> = lock.withLock {
+      storedOperations.append(operation)
+      concurrentOperations += 1
+      storedMaximumConcurrentOperations = max(
+        storedMaximumConcurrentOperations, concurrentOperations)
+      return results.isEmpty ? .success(defaultValue) : results.removeFirst()
+    }
+    if operationDelay > 0 {
+      Thread.sleep(forTimeInterval: operationDelay)
+    }
+    lock.withLock { concurrentOperations -= 1 }
+    return try result.get()
+  }
+}
+
+private final class FakeDDCServiceResolver: DDCServiceResolving, @unchecked Sendable {
+  private let lock = NSLock()
+  private let result: Result<DDCServiceCandidate, DisplayControlError>
+  private var storedDisplays: [Display] = []
+
+  init(result: Result<DDCServiceCandidate, DisplayControlError>) {
+    self.result = result
+  }
+
+  var displays: [Display] {
+    lock.withLock { storedDisplays }
+  }
+
+  func resolve(for display: Display) throws -> DDCServiceCandidate {
+    lock.withLock { storedDisplays.append(display) }
+    return try result.get()
+  }
+}
+
+private final class FakeDDCCandidateDetector: DDCCandidateDetecting, @unchecked Sendable {
+  private let lock = NSLock()
+  private let capabilities: [UUID: DDCCapability]
+  private var storedDisplays: [Display] = []
+
+  init(capabilities: [UUID: DDCCapability]) {
+    self.capabilities = capabilities
+  }
+
+  var displays: [Display] {
+    lock.withLock { storedDisplays }
+  }
+
+  func capability(for display: Display) -> DDCCapability {
+    lock.withLock { storedDisplays.append(display) }
+    return capabilities[display.uuid] ?? .unknown
   }
 }
