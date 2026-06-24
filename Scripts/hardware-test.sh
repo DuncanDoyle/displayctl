@@ -13,6 +13,21 @@ cd "$REPO_ROOT"
 print -- "Building displayctl..."
 swift build
 DISPLAYCTL="$REPO_ROOT/.build/debug/displayctl"
+EXPECTED_LIST_HEADER=$'UUID\truntimeID\tname\tkind\tonline\tactive\tmain\tDDC'
+
+validate_list_header() {
+  local table="$1"
+  local context="$2"
+  local header="${table%%$'\n'*}"
+  if [[ "$header" != "$EXPECTED_LIST_HEADER" ]]; then
+    print -u2 -- "Unexpected displayctl list header during $context; refusing to parse it."
+    return 1
+  fi
+}
+
+valid_brightness_percent() {
+  [[ "$1" =~ '^(0|[1-9][0-9]?|100)$' ]]
+}
 
 print -- ""
 print -- "WARNING: This test invokes undocumented private macOS APIs and will"
@@ -27,6 +42,7 @@ print -r -- "$INITIAL_JSON"
 print -- ""
 
 INITIAL_TABLE="$("$DISPLAYCTL" list)"
+validate_list_header "$INITIAL_TABLE" "initial inventory"
 INTERNAL_UUIDS="$(print -r -- "$INITIAL_TABLE" | awk -F '\t' 'NR > 1 && $4 == "internal" { print $1 }')"
 EXTERNAL_UUIDS="$(print -r -- "$INITIAL_TABLE" | awk -F '\t' 'NR > 1 && $4 == "external" { print $1 }')"
 
@@ -35,6 +51,17 @@ if [[ -z "$INTERNAL_UUIDS" || -z "$EXTERNAL_UUIDS" ]]; then
   print -u2 -- "A headless Core Graphics inventory may validly be empty; run this in the logged-in GUI session."
   exit 1
 fi
+EXTERNAL_COUNT="$(print -r -- "$EXTERNAL_UUIDS" | awk 'NF { count++ } END { print count + 0 }')"
+if [[ "$EXTERNAL_COUNT" != "1" ]]; then
+  print -u2 -- "HDMI validation requires exactly one external display; found $EXTERNAL_COUNT."
+  print -u2 -- "Disconnect other external displays and rerun before any mutation."
+  exit 1
+fi
+EXTERNAL_ROW="$(print -r -- "$INITIAL_TABLE" | awk -F '\t' -v uuid="$EXTERNAL_UUIDS" \
+  'NR > 1 && $1 == uuid { print }')"
+print -- "External display row selected for the HDMI phase:"
+print -r -- "$EXTERNAL_ROW"
+print -- "displayctl does not report connector type; verify this display is physically on HDMI."
 
 print -- "Type exactly: I UNDERSTAND THE DISPLAY DISRUPTION"
 read -r INITIAL_CONFIRMATION
@@ -52,6 +79,9 @@ recover() {
     print -- "Recovery command completed. Verify every physically present display visually."
   else
     print -u2 -- "Recovery command failed. Run '$DISPLAYCTL connect all' manually or log out/in."
+    if (( original_status == 0 )); then
+      original_status=1
+    fi
   fi
   exit "$original_status"
 }
@@ -106,6 +136,7 @@ choose_uuid "internal" "$INTERNAL_UUIDS"
 INTERNAL_UUID="$REPLY"
 choose_uuid "external (HDMI)" "$EXTERNAL_UUIDS"
 EXTERNAL_UUID="$REPLY"
+confirm_exact "USE PHYSICALLY HDMI-CONNECTED DISPLAY $EXTERNAL_UUID"
 
 print -- ""
 print -- "HDMI brightness read (read-back is optional on some monitors):"
@@ -118,7 +149,7 @@ fi
 
 print -- "Enter a hardware brightness percentage from 0 through 100 (50 is conservative):"
 read -r BRIGHTNESS_PERCENT
-if [[ ! "$BRIGHTNESS_PERCENT" == <-> ]] || (( BRIGHTNESS_PERCENT < 0 || BRIGHTNESS_PERCENT > 100 )); then
+if ! valid_brightness_percent "$BRIGHTNESS_PERCENT"; then
   print -u2 -- "Brightness must be a numeric integer from 0 through 100."
   exit 64
 fi
@@ -148,6 +179,7 @@ print -- ""
 print -- "Final-display protection: every active display except the selected internal"
 print -- "display will first be disconnected, including any additional externals."
 ACTIVE_TABLE="$("$DISPLAYCTL" list)"
+validate_list_header "$ACTIVE_TABLE" "final-display preparation"
 ACTIVE_UUIDS="$(print -r -- "$ACTIVE_TABLE" | awk -F '\t' 'NR > 1 && $6 == "true" { print $1 }')"
 while IFS= read -r ACTIVE_UUID; do
   [[ -z "$ACTIVE_UUID" || "$ACTIVE_UUID" == "$INTERNAL_UUID" ]] && continue
@@ -156,6 +188,7 @@ while IFS= read -r ACTIVE_UUID; do
 done <<< "$ACTIVE_UUIDS"
 
 REMAINING_TABLE="$("$DISPLAYCTL" list)"
+validate_list_header "$REMAINING_TABLE" "final-display verification"
 REMAINING_ACTIVE="$(print -r -- "$REMAINING_TABLE" | awk -F '\t' 'NR > 1 && $6 == "true" { print $1 }')"
 if [[ "$REMAINING_ACTIVE" != "$INTERNAL_UUID" ]]; then
   print -u2 -- "Could not establish exactly one active display; aborting to recovery."

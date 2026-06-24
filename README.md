@@ -102,8 +102,8 @@ physically present displays exposed by macOS:
 
 The command reports each attempted recovery independently. If the current shell
 cannot see displays, log out and back in; session-scoped changes revert at that
-boundary. Keep `connect all` available from another terminal or remote shell
-during manual testing.
+boundary. Keep `connect all` available from another terminal during manual
+testing; a remote shell is useful only if it can list the GUI session's displays.
 
 ## Hardware validation
 
