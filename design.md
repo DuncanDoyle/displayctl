@@ -163,6 +163,8 @@ The distinction between capability states is explicit:
 
 The controller uses DDC/CI luminance VCP code `0x10`.
 
+External package clients can construct the default live controller without accessing internal I/O Registry or IOAV transport types. Transport injection remains available for deterministic tests and alternative implementations.
+
 It supports:
 
 - Setting a percentage from 0 through 100 inclusive.

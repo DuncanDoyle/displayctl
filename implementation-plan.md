@@ -486,10 +486,14 @@ public struct DDCValue: Equatable, Sendable {
 }
 
 public actor DDCBrightnessController {
+    public init()
+    public init(transport: any DDCTransport)
     public func get(display: Display) throws -> DDCValue
     public func set(percent: Int, display: Display) throws
 }
 ```
+
+The zero-argument initializer composes the internal live I/O Registry resolver and IOAV transport so the separate `displayctl` target can use hardware brightness without exposing private transport implementation types. The transport initializer remains available for tests and alternative transports.
 
 Use chip address `0x37`, data address `0x51`, bounded retry counts, and bounded `usleep` delays. Require `.external`; reject any other display before service resolution. `set` validates `0...100`, attempts a read to discover maximum, uses `100` if read-back is unsupported, and does not hide write failure. Update inventory capability to `.candidate` only when a unique safe service match exists; never report `.confirmed` from discovery alone.
 
