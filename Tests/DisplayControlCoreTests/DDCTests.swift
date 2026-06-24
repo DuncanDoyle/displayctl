@@ -364,8 +364,8 @@ final class DDCTests: XCTestCase {
     XCTAssertNil(DDCEndpointIndex.extract(from: ["dcpext0", "dcpext1"], prefix: "dcpext"))
   }
 
-  func testTopologyPairerMapsExactEndpointZero() {
-    let candidates = DDCRegistryTopologyPairer.candidates(
+  func testTopologyPairerMapsExactEndpointZero() throws {
+    let candidates = try DDCRegistryTopologyPairer.candidates(
       proxies: [proxyRecord(id: 10, endpointIndex: 0)],
       framebuffers: [framebufferRecord(endpointIndex: 0, productName: "DISPLAY ZERO")]
     )
@@ -374,8 +374,8 @@ final class DDCTests: XCTestCase {
     XCTAssertEqual(candidates.first?.productName, "DISPLAY ZERO")
   }
 
-  func testTopologyPairerMapsMultipleEndpointIndicesWithoutCrossPairing() {
-    let candidates = DDCRegistryTopologyPairer.candidates(
+  func testTopologyPairerMapsMultipleEndpointIndicesWithoutCrossPairing() throws {
+    let candidates = try DDCRegistryTopologyPairer.candidates(
       proxies: [proxyRecord(id: 10, endpointIndex: 0), proxyRecord(id: 11, endpointIndex: 1)],
       framebuffers: [
         framebufferRecord(endpointIndex: 1, productName: "DISPLAY ONE"),
@@ -387,8 +387,8 @@ final class DDCTests: XCTestCase {
     XCTAssertEqual(candidates.first { $0.serviceID == 11 }?.productName, "DISPLAY ONE")
   }
 
-  func testTopologyPairerLeavesMissingAndMismatchedEndpointMetadataEmpty() {
-    let candidates = DDCRegistryTopologyPairer.candidates(
+  func testTopologyPairerLeavesMissingAndMismatchedEndpointMetadataEmpty() throws {
+    let candidates = try DDCRegistryTopologyPairer.candidates(
       proxies: [proxyRecord(id: 10, endpointIndex: nil), proxyRecord(id: 11, endpointIndex: 1)],
       framebuffers: [framebufferRecord(endpointIndex: 0, productName: "WRONG DISPLAY")]
     )
@@ -396,21 +396,29 @@ final class DDCTests: XCTestCase {
     XCTAssertTrue(candidates.allSatisfy { $0.productName == nil && $0.serial == nil })
   }
 
-  func testTopologyPairerRejectsDuplicateEndpointAmbiguity() {
-    let duplicateProxies = DDCRegistryTopologyPairer.candidates(
-      proxies: [proxyRecord(id: 10, endpointIndex: 0), proxyRecord(id: 11, endpointIndex: 0)],
-      framebuffers: [framebufferRecord(endpointIndex: 0, productName: "DISPLAY ZERO")]
-    )
-    let duplicateFramebuffers = DDCRegistryTopologyPairer.candidates(
-      proxies: [proxyRecord(id: 12, endpointIndex: 1)],
-      framebuffers: [
-        framebufferRecord(endpointIndex: 1, productName: "FIRST"),
-        framebufferRecord(endpointIndex: 1, productName: "SECOND"),
-      ]
-    )
+  func testTopologyPairerReportsDuplicateProxyIndexAsAmbiguous() {
+    XCTAssertThrowsError(
+      try DDCRegistryTopologyPairer.candidates(
+        proxies: [proxyRecord(id: 10, endpointIndex: 0), proxyRecord(id: 11, endpointIndex: 0)],
+        framebuffers: [framebufferRecord(endpointIndex: 0, productName: "DISPLAY ZERO")]
+      )
+    ) {
+      XCTAssertEqual($0 as? DisplayControlError, .ddcServiceAmbiguous)
+    }
+  }
 
-    XCTAssertTrue(duplicateProxies.allSatisfy { $0.productName == nil })
-    XCTAssertTrue(duplicateFramebuffers.allSatisfy { $0.productName == nil })
+  func testTopologyPairerReportsDuplicateFramebufferIndexAsAmbiguous() {
+    XCTAssertThrowsError(
+      try DDCRegistryTopologyPairer.candidates(
+        proxies: [proxyRecord(id: 12, endpointIndex: 1)],
+        framebuffers: [
+          framebufferRecord(endpointIndex: 1, productName: "FIRST"),
+          framebufferRecord(endpointIndex: 1, productName: "SECOND"),
+        ]
+      )
+    ) {
+      XCTAssertEqual($0 as? DisplayControlError, .ddcServiceAmbiguous)
+    }
   }
 
   func testRegistryServiceSelectorSkipsUnreadableIDsBeforeTarget() {

@@ -540,12 +540,18 @@ enum DDCRegistryTopologyPairer {
   static func candidates(
     proxies: [DDCRegistryProxyRecord],
     framebuffers: [DDCRegistryFramebufferRecord]
-  ) -> [DDCServiceCandidate] {
+  ) throws -> [DDCServiceCandidate] {
     let proxiesByIndex = Dictionary(grouping: proxies.compactMap(indexedProxy), by: \.index)
     let framebuffersByIndex = Dictionary(
       grouping: framebuffers.compactMap(indexedFramebuffer),
       by: \.index
     )
+    guard
+      !proxiesByIndex.values.contains(where: { $0.count > 1 }),
+      !framebuffersByIndex.values.contains(where: { $0.count > 1 })
+    else {
+      throw DisplayControlError.ddcServiceAmbiguous
+    }
 
     return proxies.map { proxy in
       let framebufferProperties: [String: Any]
@@ -646,7 +652,7 @@ final class IORegistryDDCServiceRegistry: @unchecked Sendable {
       }
       IOObjectRelease(entry)
     }
-    return DDCRegistryTopologyPairer.candidates(
+    return try DDCRegistryTopologyPairer.candidates(
       proxies: proxies,
       framebuffers: framebuffers
     )
