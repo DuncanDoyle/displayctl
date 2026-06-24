@@ -11,7 +11,6 @@ enum CLICommand: Equatable {
   case brightnessGet(selector: String)
   case brightnessSet(selector: String, percent: Int)
 }
-
 enum CLIParser {
   static func parse(_ arguments: [String]) throws -> CLICommand {
     switch arguments {
@@ -46,34 +45,25 @@ enum CLIParser {
     }
     throw DisplayControlError.invalidArguments("Invalid command or arguments")
   }
-
   private static func parseSelector(_ value: String) throws -> String {
-    guard !value.isEmpty, !value.hasPrefix("-") else {
+    guard !value.isEmpty, !value.hasPrefix("-"), value != "all" else {
       throw DisplayControlError.invalidArguments("Invalid display selector")
     }
     return value
   }
 }
-
-struct BrightnessReading: Sendable {
-  let display: Display
-  let value: DDCValue
-}
-
 protocol CLIService: Sendable {
   func list() async throws -> [Display]
   func connect(_ selector: String) async throws -> Display
   func connectAll() async throws -> [DisplayConnectionOutcome]
   func disconnect(_ selector: String) async throws -> Display
-  func brightnessGet(_ selector: String) async throws -> BrightnessReading
+  func brightnessGet(_ selector: String) async throws -> (Display, DDCValue)
   func brightnessSet(_ selector: String, percent: Int) async throws -> Display
 }
-
 struct LiveCLIService: CLIService {
   private let inventory: DisplayInventory
   private let connection: ConnectionController
   private let brightness: DDCBrightnessController
-
   init() {
     let inventory = DisplayInventory()
     self.inventory = inventory
@@ -81,35 +71,31 @@ struct LiveCLIService: CLIService {
       snapshot: inventory, hardware: CoreGraphicsDisplayConnectionHardware())
     brightness = DDCBrightnessController()
   }
-
   func list() async throws -> [Display] { try inventory.snapshot() }
   func connect(_ selector: String) async throws -> Display { try connection.connect(selector) }
   func connectAll() async throws -> [DisplayConnectionOutcome] { try connection.connectAll() }
   func disconnect(_ selector: String) async throws -> Display {
     try connection.disconnect(selector)
   }
-
-  func brightnessGet(_ selector: String) async throws -> BrightnessReading {
+  func brightnessGet(_ selector: String) async throws -> (Display, DDCValue) {
     let display = try DisplaySelector.resolve(selector, in: inventory.snapshot())
-    return try await BrightnessReading(display: display, value: brightness.get(display: display))
+    return try await (display, brightness.get(display: display))
   }
-
   func brightnessSet(_ selector: String, percent: Int) async throws -> Display {
     let display = try DisplaySelector.resolve(selector, in: inventory.snapshot())
     try await brightness.set(percent: percent, display: display)
     return display
   }
 }
-
 struct CLIResult: Equatable, Sendable {
   var stdout = ""
   var stderr = ""
   var exitCode: Int32 = 0
 }
-
 struct CLIApplication: Sendable {
   static let help = """
     Usage:
+      displayctl --help
       displayctl list [--json]
       displayctl connect <selector>
       displayctl connect all
@@ -119,11 +105,8 @@ struct CLIApplication: Sendable {
 
     Selectors: display UUID, runtime display ID, internal, or external.
     """
-
   private let service: any CLIService
-
   init(service: any CLIService) { self.service = service }
-
   static func run(
     arguments: [String],
     serviceFactory: () -> any CLIService
@@ -136,7 +119,6 @@ struct CLIApplication: Sendable {
       return failure(error)
     }
   }
-
   func execute(_ command: CLICommand) async -> CLIResult {
     do {
       switch command {
@@ -151,10 +133,9 @@ struct CLIApplication: Sendable {
       case .connectAll:
         return try await connectAll()
       case .brightnessGet(let selector):
-        let reading = try await service.brightnessGet(selector)
+        let (display, value) = try await service.brightnessGet(selector)
         return CLIResult(
-          stdout:
-            "\(identity(reading.display)) brightness=\(reading.value.current)/\(reading.value.maximum)\n"
+          stdout: "\(identity(display)) brightness=\(value.current)/\(value.maximum)\n"
         )
       case .brightnessSet(let selector, let percent):
         let display = try await service.brightnessSet(selector, percent: percent)
@@ -164,13 +145,12 @@ struct CLIApplication: Sendable {
       return Self.failure(error)
     }
   }
-
   private func connectAll() async throws -> CLIResult {
     var result = CLIResult()
     for outcome in try await service.connectAll() {
       switch outcome.result {
       case .success(let connected):
-        result.stdout += "connected \(identity(outcome.display)) active=\(connected.isActive)\n"
+        result.stdout += "connected \(identity(connected)) active=\(connected.isActive)\n"
       case .failure(let error):
         result.stderr += "\(identity(outcome.display)): \(Self.describe(error))\n"
         result.exitCode = max(result.exitCode, Self.exitCode(for: error))
@@ -178,7 +158,6 @@ struct CLIApplication: Sendable {
     }
     return result
   }
-
   private func renderList(_ displays: [Display], json: Bool) throws -> String {
     if json {
       let encoder = JSONEncoder()
@@ -187,27 +166,26 @@ struct CLIApplication: Sendable {
     }
     var lines = ["UUID\truntimeID\tname\tkind\tonline\tactive\tmain\tDDC"]
     lines += displays.map {
-      "\($0.uuid.uuidString)\t\($0.runtimeID)\t\($0.name)\t\($0.kind.rawValue)\t"
+      "\($0.uuid.uuidString)\t\($0.runtimeID)\t\(escape($0.name))\t\($0.kind.rawValue)\t"
         + "\($0.isOnline)\t\($0.isActive)\t\($0.isMain)\t\($0.ddcCapability.rawValue)"
     }
     return lines.joined(separator: "\n") + "\n"
   }
-
   private func mutation(_ verb: String, _ display: Display) -> String {
     "\(verb) \(identity(display)) active=\(display.isActive)\n"
   }
-
   private func identity(_ display: Display) -> String {
-    "uuid=\(display.uuid.uuidString) runtimeID=\(display.runtimeID) name=\(display.name)"
+    "uuid=\(display.uuid.uuidString) runtimeID=\(display.runtimeID) name=\(escape(display.name))"
   }
-
+  private func escape(_ value: String) -> String {
+    String(String(reflecting: value).dropFirst().dropLast())
+  }
   private static func failure(_ error: Error) -> CLIResult {
     let typed = error as? DisplayControlError
     return CLIResult(
       stderr: "error: \(typed.map(describe) ?? String(describing: error))\n",
       exitCode: typed.map(exitCode) ?? 1)
   }
-
   private static func exitCode(for error: DisplayControlError) -> Int32 {
     switch error {
     case .invalidArguments: 64
@@ -216,20 +194,22 @@ struct CLIApplication: Sendable {
     default: 1
     }
   }
-
   private static func describe(_ error: DisplayControlError) -> String {
     switch error {
-    case .invalidArguments(let message), .displayNotFound(let message),
-      .ambiguousSelector(let message), .invalidState(let message),
-      .unsupportedAPI(let message), .configurationFailed(let message),
-      .postconditionFailed(let message), .ddcTransport(let message),
-      .ddcInvalidResponse(let message):
-      message
+    case .invalidArguments(let message): "Invalid arguments: \(message)"
+    case .displayNotFound(let selector): "Display not found: \(selector)"
+    case .ambiguousSelector(let selector): "Ambiguous display selector: \(selector)"
+    case .invalidState(let message): "Invalid display state: \(message)"
     case .lastActiveDisplay: "Cannot disconnect the last active display"
+    case .unsupportedAPI(let message): "Unsupported API: \(message)"
+    case .configurationFailed(let message): "Display configuration failed: \(message)"
+    case .postconditionFailed(let message): "Display postcondition failed: \(message)"
     case .ddcServiceNotFound: "DDC service not found"
     case .ddcServiceAmbiguous: "DDC service match is ambiguous"
     case .ddcUnsupported: "DDC is unsupported"
     case .ddcTimeout: "DDC operation timed out"
+    case .ddcTransport(let message): "DDC transport failed: \(message)"
+    case .ddcInvalidResponse(let message): "Invalid DDC response: \(message)"
     }
   }
 }
