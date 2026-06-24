@@ -98,8 +98,9 @@ final class CLIParserTests: XCTestCase {
     XCTAssertEqual(disconnect.stdout, "disconnected \(identity) active=false\n")
     XCTAssertTrue(get.stdout.contains("brightness=40/80"))
     XCTAssertTrue(set.stdout.contains("brightness=75%"))
+    let calls = await service.calls
     XCTAssertEqual(
-      service.calls, ["connect:external", "disconnect:42", "get:external", "set:42:75"])
+      calls, ["connect:external", "disconnect:42", "get:external", "set:42:75"])
   }
   func testConnectAllUsesVerifiedSuccessIdentityAndCandidateFailureIdentity() async {
     let candidate = display(id: 9, name: "Candidate", active: false)
@@ -144,7 +145,7 @@ final class CLIParserTests: XCTestCase {
     }
   }
 }
-private final class StubService: CLIService, @unchecked Sendable {
+private actor StubService: CLIService {
   let displays: [Display]
   let outcomes: [DisplayConnectionOutcome]
   let error: DisplayControlError?

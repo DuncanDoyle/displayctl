@@ -213,7 +213,6 @@ struct CLIApplication: Sendable {
     }
   }
 }
-
 let cliResult = await CLIApplication.run(
   arguments: Array(CommandLine.arguments.dropFirst()), serviceFactory: { LiveCLIService() })
 if !cliResult.stdout.isEmpty { FileHandle.standardOutput.write(Data(cliResult.stdout.utf8)) }
