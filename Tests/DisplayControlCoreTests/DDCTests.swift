@@ -4,6 +4,16 @@ import XCTest
 @testable import DisplayControlCore
 
 final class DDCTests: XCTestCase {
+  func testLiveControllerConstructionIsLazy() {
+    _ = DDCBrightnessController()
+
+    let resolver = FakeDDCServiceResolver(result: .failure(.ddcServiceNotFound))
+    let liveTransport = IOAVDDCTransport(resolver: resolver)
+    _ = DDCBrightnessController(transport: liveTransport)
+
+    XCTAssertTrue(resolver.displays.isEmpty)
+  }
+
   func testControllerGetReturnsBrightnessFromTransport() async throws {
     let transport = FakeDDCTransport(readResults: [.success(DDCValue(current: 37, maximum: 200))])
     let controller = makeController(transport: transport)

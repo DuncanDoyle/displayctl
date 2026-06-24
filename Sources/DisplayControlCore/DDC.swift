@@ -32,6 +32,10 @@ public actor DDCBrightnessController {
   private let retryPolicy: DDCRetryPolicy
   private let sleeper: @Sendable (UInt32) -> Void
 
+  public init() {
+    self.init(transport: IOAVDDCTransport())
+  }
+
   public init(transport: any DDCTransport) {
     self.init(
       transport: transport,
