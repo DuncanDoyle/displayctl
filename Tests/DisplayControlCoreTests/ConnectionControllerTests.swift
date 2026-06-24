@@ -116,12 +116,12 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore(displays)
     store.failureIDs = [3]
 
-    let results = try ConnectionController(snapshot: store, hardware: store).connectAll()
+    let outcomes = try ConnectionController(snapshot: store, hardware: store).connectAll()
 
     XCTAssertEqual(store.requests, [.init(id: 3, enabled: true), .init(id: 2, enabled: true)])
-    XCTAssertEqual(results.count, 2)
-    assertFailure(results[0], .configurationFailed("fake failure 3"))
-    XCTAssertEqual(try results[1].get().runtimeID, 2)
+    XCTAssertEqual(outcomes.map(\.display), [displays[0], displays[2]])
+    assertFailure(outcomes[0].result, .configurationFailed("fake failure 3"))
+    XCTAssertEqual(try outcomes[1].result.get().runtimeID, 2)
   }
 
   func testConnectAllTreatsCandidateActivatedBeforeTurnAsSuccessAndContinues() throws {
@@ -133,11 +133,65 @@ final class ConnectionControllerTests: XCTestCase {
     let controller = ConnectionController(
       snapshot: store, hardware: store, lock: operationLock)
 
-    let results = try controller.connectAll()
+    let outcomes = try controller.connectAll()
 
-    XCTAssertEqual(try results.map { try $0.get().runtimeID }, [1, 2, 3])
+    XCTAssertEqual(outcomes.map(\.display), store.initialDisplays)
+    XCTAssertEqual(try outcomes.map { try $0.result.get().runtimeID }, [1, 2, 3])
     XCTAssertEqual(store.requests, [.init(id: 1, enabled: true), .init(id: 3, enabled: true)])
     XCTAssertEqual(operationLock.acquisitionCount, 1)
+  }
+
+  func testDisplayConnectionOutcomePublicInitializerPreservesTypedFailure() {
+    let display = fixture(1, active: false)
+    let outcome = DisplayConnectionOutcome(
+      display: display,
+      result: .failure(.configurationFailed("failed"))
+    )
+
+    XCTAssertEqual(outcome.display, display)
+    assertFailure(outcome.result, .configurationFailed("failed"))
+  }
+
+  func testDarwinLocksContendAndReleaseAfterSuccess() throws {
+    let lockURL = uniqueLockURL()
+    defer { try? FileManager.default.removeItem(at: lockURL) }
+    let holder = DarwinDisplayOperationLock(
+      lockURL: lockURL, maximumAttempts: 100, retryDelayMicroseconds: 1_000)
+    let contender = DarwinDisplayOperationLock(
+      lockURL: lockURL, maximumAttempts: 2, retryDelayMicroseconds: 1_000)
+    let acquired = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    let finished = DispatchSemaphore(value: 0)
+
+    DispatchQueue.global().async {
+      defer { finished.signal() }
+      try? holder.withLock {
+        acquired.signal()
+        release.wait()
+      }
+    }
+    XCTAssertEqual(acquired.wait(timeout: .now() + 2), .success)
+    XCTAssertThrowsError(try contender.withLock {}) {
+      guard case .configurationFailed(let message) = $0 as? DisplayControlError else {
+        return XCTFail("unexpected error \($0)")
+      }
+      XCTAssertTrue(message.contains("timed out"))
+    }
+    release.signal()
+    XCTAssertEqual(finished.wait(timeout: .now() + 2), .success)
+    XCTAssertNoThrow(try contender.withLock {})
+  }
+
+  func testDarwinLockReleasesAfterProtectedClosureThrows() {
+    let lockURL = uniqueLockURL()
+    defer { try? FileManager.default.removeItem(at: lockURL) }
+    let first = DarwinDisplayOperationLock(lockURL: lockURL)
+    let second = DarwinDisplayOperationLock(lockURL: lockURL)
+
+    XCTAssertThrowsError(try first.withLock { throw TestLockError.expected }) {
+      XCTAssertTrue($0 is TestLockError)
+    }
+    XCTAssertNoThrow(try second.withLock {})
   }
 
   func testRefreshFailureAfterMutationBecomesPostconditionFailureWithUUIDAndCause() {
@@ -184,6 +238,9 @@ final class ConnectionControllerTests: XCTestCase {
       let expected = stage == .begin ? ["begin"] : stage.expectedOperations + ["cancel"]
       XCTAssertEqual(api.operations, expected)
       XCTAssertEqual(api.cancelCount, stage == .begin ? 0 : 1)
+      if stage == .complete {
+        XCTAssertEqual(api.cancelConfigs, [api.config])
+      }
     }
   }
 
@@ -206,6 +263,8 @@ final class ConnectionControllerTests: XCTestCase {
       )
       XCTAssertEqual(api.cancelCount, 1)
       XCTAssertEqual(api.operations.last, "cancel")
+      let expectedConfig: CGDisplayConfigRef? = api.nilConfig ? nil : api.config
+      XCTAssertEqual(api.cancelConfigs, [expectedConfig])
     }
   }
 
@@ -233,6 +292,7 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
   @unchecked Sendable
 {
   var displays: [Display]
+  let initialDisplays: [Display]
   struct Request: Equatable {
     let id: UInt32
     let enabled: Bool
@@ -246,7 +306,10 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
   var duplicateAfterMutation = false
   var removeAfterMutation = false
 
-  init(_ displays: [Display]) { self.displays = displays }
+  init(_ displays: [Display]) {
+    self.displays = displays
+    initialDisplays = displays
+  }
 
   func snapshot() throws -> [Display] {
     snapshotCount += 1
@@ -445,4 +508,13 @@ private func assertPostcondition(_ error: Error, contains fragments: [String]) {
   for fragment in fragments {
     XCTAssertTrue(message.contains(fragment), "\(message) does not contain \(fragment)")
   }
+}
+
+private enum TestLockError: Error {
+  case expected
+}
+
+private func uniqueLockURL() -> URL {
+  FileManager.default.temporaryDirectory
+    .appendingPathComponent("displaycontrol-tests-\(UUID().uuidString).lock")
 }

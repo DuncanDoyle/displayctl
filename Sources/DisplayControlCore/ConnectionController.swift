@@ -6,24 +6,43 @@ public protocol DisplayConnectionHardware: Sendable {
   func setEnabled(_ displayID: UInt32, enabled: Bool) throws
 }
 
+public struct DisplayConnectionOutcome: Sendable {
+  public let display: Display
+  public let result: Result<Display, DisplayControlError>
+
+  public init(display: Display, result: Result<Display, DisplayControlError>) {
+    self.display = display
+    self.result = result
+  }
+}
+
 protocol DisplayOperationLocking: Sendable {
   func withLock<T>(_ operation: () throws -> T) throws -> T
 }
 
 struct DarwinDisplayOperationLock: DisplayOperationLocking {
+  private let configuredLockURL: URL?
   private let maximumAttempts: Int
   private let retryDelayMicroseconds: useconds_t
 
-  init(maximumAttempts: Int = 50, retryDelayMicroseconds: useconds_t = 20_000) {
+  init(
+    lockURL: URL? = nil,
+    maximumAttempts: Int = 50,
+    retryDelayMicroseconds: useconds_t = 20_000
+  ) {
+    configuredLockURL = lockURL
     self.maximumAttempts = maximumAttempts
     self.retryDelayMicroseconds = retryDelayMicroseconds
   }
 
   func withLock<T>(_ operation: () throws -> T) throws -> T {
-    let path = FileManager.default.temporaryDirectory
-      .appendingPathComponent("displaycontrol-connection.lock").path
+    let lockURL =
+      configuredLockURL
+      ?? FileManager.default.temporaryDirectory
+      .appendingPathComponent("displaycontrol-connection.lock")
+    let path = lockURL.path
     let descriptor = path.withCString {
-      open($0, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
+      open($0, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(S_IRUSR | S_IWUSR))
     }
     guard descriptor >= 0 else {
       let code = errno
@@ -97,18 +116,20 @@ public struct ConnectionController: Sendable {
     }
   }
 
-  public func connectAll() throws -> [Result<Display, DisplayControlError>] {
+  public func connectAll() throws -> [DisplayConnectionOutcome] {
     try operationLock.withLock {
       let candidates = try snapshot.snapshot().filter { $0.isOnline && !$0.isActive }
       return candidates.map { display in
+        let result: Result<Display, DisplayControlError>
         do {
-          return .success(
+          result = .success(
             try connectUnlocked(display.uuid.uuidString, acceptAlreadyActive: true))
         } catch let error as DisplayControlError {
-          return .failure(error)
+          result = .failure(error)
         } catch {
-          return .failure(.configurationFailed(String(describing: error)))
+          result = .failure(.configurationFailed(String(describing: error)))
         }
+        return DisplayConnectionOutcome(display: display, result: result)
       }
     }
   }
