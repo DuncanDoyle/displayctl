@@ -102,7 +102,8 @@ struct DDCServiceCandidate: Equatable, Sendable {
 }
 
 enum DDCServiceMatcher {
-  // An EDID identity match is the minimum acceptable strong match.
+  // Any conflict-free location, serial, or EDID match passes the strong-identity gate;
+  // EDID carries the lowest qualifying score.
   static let minimumScore = 60
 
   private static let displayLocationWeight = 100
