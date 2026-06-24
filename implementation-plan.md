@@ -360,19 +360,24 @@ public protocol DisplayConnectionHardware: Sendable {
     func setEnabled(_ displayID: UInt32, enabled: Bool) throws
 }
 
+public struct DisplayConnectionOutcome: Sendable {
+    public let display: Display
+    public let result: Result<Display, DisplayControlError>
+}
+
 public struct ConnectionController: Sendable {
     public init(snapshot: any DisplaySnapshotProviding, hardware: any DisplayConnectionHardware)
     public func connect(_ selector: String) throws -> Display
-    public func connectAll() throws -> [Result<Display, DisplayControlError>]
+    public func connectAll() throws -> [DisplayConnectionOutcome]
     public func disconnect(_ selector: String) throws -> Display
 }
 ```
 
-The controller's public initializer uses a per-user Darwin `flock` implementation stored in the user's temporary directory; an internal initializer injects the lock for tests. Hold the lock across the complete snapshot, selection, last-active validation, hardware transaction, and postcondition verification sequence. Use bounded nonblocking acquisition retries and map acquisition failure or timeout to a descriptive `configurationFailed`. Keep `connectAll` under one lock and use internal non-locking helpers to avoid recursive acquisition.
+The controller's public initializer uses a per-user Darwin `flock` implementation stored in the user's temporary directory; an internal initializer injects the lock for tests. Hold the lock across the complete snapshot, selection, last-active validation, hardware transaction, and postcondition verification sequence. Use bounded nonblocking acquisition retries and map acquisition failure or timeout to a descriptive `configurationFailed`. Open lock descriptors with `O_CLOEXEC`. Keep `connectAll` under one lock and use internal non-locking helpers to avoid recursive acquisition. Tests must exercise two independent live lock instances contending on the same path, bounded timeout, and release after both successful and throwing protected operations.
 
 The live adapter must call `CGBeginDisplayConfiguration`, the dynamically resolved `CGSConfigureDisplayEnabled`, and `CGCompleteDisplayConfiguration(config, .forSession)`. Call `CGCancelDisplayConfiguration` on every failure after a successful begin and before successful completion. If cancellation also fails, preserve both failures in the reported diagnostic. Tests must verify that enable, complete, and cancel receive the exact configuration returned by begin and that completion uses `.forSession`.
 
-After hardware completion, wrap snapshot failures as `postconditionFailed` because final state is unknown. Require exactly one refreshed display with the selected UUID and the requested active state. Make `connectAll` recovery idempotent by treating a candidate that is already active when re-resolved as success.
+After hardware completion, wrap snapshot failures as `postconditionFailed` because final state is unknown. Require exactly one refreshed display with the selected UUID and the requested active state. Make `connectAll` recovery idempotent by treating a candidate that is already active when re-resolved as success. Preserve the original candidate `Display` in every `DisplayConnectionOutcome`, including failures, while retaining the underlying typed `DisplayControlError`.
 
 - [ ] **Step 4: Verify controller behavior**
 
