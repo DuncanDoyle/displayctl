@@ -1,13 +1,76 @@
 import CoreGraphics
+import Darwin
 import Foundation
 
 public protocol DisplayConnectionHardware: Sendable {
   func setEnabled(_ displayID: UInt32, enabled: Bool) throws
 }
 
+protocol DisplayOperationLocking: Sendable {
+  func withLock<T>(_ operation: () throws -> T) throws -> T
+}
+
+struct DarwinDisplayOperationLock: DisplayOperationLocking {
+  private let maximumAttempts: Int
+  private let retryDelayMicroseconds: useconds_t
+
+  init(maximumAttempts: Int = 50, retryDelayMicroseconds: useconds_t = 20_000) {
+    self.maximumAttempts = maximumAttempts
+    self.retryDelayMicroseconds = retryDelayMicroseconds
+  }
+
+  func withLock<T>(_ operation: () throws -> T) throws -> T {
+    let path = FileManager.default.temporaryDirectory
+      .appendingPathComponent("displaycontrol-connection.lock").path
+    let descriptor = path.withCString {
+      open($0, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
+    }
+    guard descriptor >= 0 else {
+      let code = errno
+      throw lockFailure("open", path: path, errno: code)
+    }
+
+    var acquired = false
+    defer {
+      if acquired {
+        _ = flock(descriptor, LOCK_UN)
+      }
+      _ = close(descriptor)
+    }
+
+    for attempt in 0..<maximumAttempts {
+      if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+        acquired = true
+        return try operation()
+      }
+
+      let code = errno
+      guard code == EWOULDBLOCK || code == EAGAIN else {
+        throw lockFailure("flock", path: path, errno: code)
+      }
+      if attempt + 1 < maximumAttempts {
+        usleep(retryDelayMicroseconds)
+      }
+    }
+
+    throw DisplayControlError.configurationFailed(
+      "flock timed out acquiring display operation lock at \(path) "
+        + "after \(maximumAttempts) attempts"
+    )
+  }
+
+  private func lockFailure(_ api: String, path: String, errno code: Int32) -> DisplayControlError {
+    .configurationFailed(
+      "\(api) failed for display operation lock at \(path) with errno \(code): "
+        + String(cString: strerror(code))
+    )
+  }
+}
+
 public struct ConnectionController: Sendable {
   private let snapshot: any DisplaySnapshotProviding
   private let hardware: any DisplayConnectionHardware
+  private let operationLock: any DisplayOperationLocking
 
   public init(
     snapshot: any DisplaySnapshotProviding,
@@ -15,31 +78,63 @@ public struct ConnectionController: Sendable {
   ) {
     self.snapshot = snapshot
     self.hardware = hardware
+    operationLock = DarwinDisplayOperationLock()
+  }
+
+  init(
+    snapshot: any DisplaySnapshotProviding,
+    hardware: any DisplayConnectionHardware,
+    lock: any DisplayOperationLocking
+  ) {
+    self.snapshot = snapshot
+    self.hardware = hardware
+    operationLock = lock
   }
 
   public func connect(_ selector: String) throws -> Display {
+    try operationLock.withLock {
+      try connectUnlocked(selector, acceptAlreadyActive: false)
+    }
+  }
+
+  public func connectAll() throws -> [Result<Display, DisplayControlError>] {
+    try operationLock.withLock {
+      let candidates = try snapshot.snapshot().filter { $0.isOnline && !$0.isActive }
+      return candidates.map { display in
+        do {
+          return .success(
+            try connectUnlocked(display.uuid.uuidString, acceptAlreadyActive: true))
+        } catch let error as DisplayControlError {
+          return .failure(error)
+        } catch {
+          return .failure(.configurationFailed(String(describing: error)))
+        }
+      }
+    }
+  }
+
+  public func disconnect(_ selector: String) throws -> Display {
+    try operationLock.withLock {
+      try disconnectUnlocked(selector)
+    }
+  }
+
+  private func connectUnlocked(
+    _ selector: String,
+    acceptAlreadyActive: Bool
+  ) throws -> Display {
     let displays = try snapshot.snapshot()
     let display = try DisplaySelector.resolve(selector, in: displays)
+    if display.isActive, acceptAlreadyActive {
+      return display
+    }
     guard !display.isActive else {
       throw DisplayControlError.invalidState("Display \(display.runtimeID) is already active")
     }
     return try transition(display, enabled: true)
   }
 
-  public func connectAll() throws -> [Result<Display, DisplayControlError>] {
-    let candidates = try snapshot.snapshot().filter { $0.isOnline && !$0.isActive }
-    return candidates.map { display in
-      do {
-        return .success(try connect(display.uuid.uuidString))
-      } catch let error as DisplayControlError {
-        return .failure(error)
-      } catch {
-        return .failure(.configurationFailed(String(describing: error)))
-      }
-    }
-  }
-
-  public func disconnect(_ selector: String) throws -> Display {
+  private func disconnectUnlocked(_ selector: String) throws -> Display {
     let displays = try snapshot.snapshot()
     let display = try DisplaySelector.resolve(selector, in: displays)
     guard display.isActive else {
@@ -53,14 +148,27 @@ public struct ConnectionController: Sendable {
 
   private func transition(_ display: Display, enabled: Bool) throws -> Display {
     try hardware.setEnabled(display.runtimeID, enabled: enabled)
-    let refreshed = try snapshot.snapshot()
-    guard
-      let result = refreshed.first(where: { $0.uuid == display.uuid }),
-      result.isActive == enabled
-    else {
+    let refreshed: [Display]
+    do {
+      refreshed = try snapshot.snapshot()
+    } catch {
+      throw DisplayControlError.postconditionFailed(
+        "Display \(display.uuid.uuidString) refresh failed after requesting enabled "
+          + "\(enabled): \(error)"
+      )
+    }
+
+    let matches = refreshed.filter { $0.uuid == display.uuid }
+    guard matches.count == 1, let result = matches.first else {
+      throw DisplayControlError.postconditionFailed(
+        "Display \(display.uuid.uuidString) had \(matches.count) matches after requesting "
+          + "enabled \(enabled)"
+      )
+    }
+    guard result.isActive == enabled else {
       let state = enabled ? "active" : "inactive"
       throw DisplayControlError.postconditionFailed(
-        "Display \(display.runtimeID) did not become \(state)"
+        "Display \(display.uuid.uuidString) did not become \(state)"
       )
     }
     return result
@@ -100,33 +208,68 @@ public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
     var config: CGDisplayConfigRef?
     let beginError = api.begin(&config)
     guard beginError == .success else {
-      throw nativeFailure("CGBeginDisplayConfiguration", beginError)
-    }
-
-    var completed = false
-    defer {
-      if !completed { _ = api.cancel(config) }
-    }
-
-    guard config != nil else {
-      throw DisplayControlError.configurationFailed(
-        "CGBeginDisplayConfiguration returned success with nil configuration"
+      throw nativeFailure(
+        "CGBeginDisplayConfiguration",
+        beginError,
+        displayID: displayID,
+        enabled: enabled
       )
     }
 
-    let enableError = try api.enable(config, displayID, enabled)
-    guard enableError == .success else {
-      throw nativeFailure("CGSConfigureDisplayEnabled", enableError)
-    }
+    do {
+      guard config != nil else {
+        throw DisplayControlError.configurationFailed(
+          "CGBeginDisplayConfiguration returned success with nil configuration for display "
+            + "\(displayID), enabled \(enabled)"
+        )
+      }
 
-    let completeError = api.complete(config, .forSession)
-    guard completeError == .success else {
-      throw nativeFailure("CGCompleteDisplayConfiguration", completeError)
+      let enableError = try api.enable(config, displayID, enabled)
+      guard enableError == .success else {
+        throw nativeFailure(
+          "CGSConfigureDisplayEnabled",
+          enableError,
+          displayID: displayID,
+          enabled: enabled
+        )
+      }
+
+      let completeError = api.complete(config, .forSession)
+      guard completeError == .success else {
+        throw nativeFailure(
+          "CGCompleteDisplayConfiguration",
+          completeError,
+          displayID: displayID,
+          enabled: enabled
+        )
+      }
+    } catch {
+      let cancelError = api.cancel(config)
+      guard cancelError == .success else {
+        throw DisplayControlError.configurationFailed(
+          "\(failureDescription(error)); CGCancelDisplayConfiguration failed with error "
+            + "\(cancelError.rawValue) for display \(displayID), enabled \(enabled)"
+        )
+      }
+      throw error
     }
-    completed = true
   }
 
-  private func nativeFailure(_ apiName: String, _ error: CGError) -> DisplayControlError {
-    .configurationFailed("\(apiName) failed with error \(error.rawValue)")
+  private func nativeFailure(
+    _ apiName: String,
+    _ error: CGError,
+    displayID: UInt32,
+    enabled: Bool
+  ) -> DisplayControlError {
+    .configurationFailed(
+      "\(apiName) failed with error \(error.rawValue) for display \(displayID), enabled \(enabled)"
+    )
+  }
+
+  private func failureDescription(_ error: Error) -> String {
+    if case .configurationFailed(let message) = error as? DisplayControlError {
+      return message
+    }
+    return String(describing: error)
   }
 }
