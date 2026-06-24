@@ -21,21 +21,43 @@ final class DDCTests: XCTestCase {
     )
   }
 
+  func testParsesHighByteVCPValues() throws {
+    XCTAssertEqual(
+      try DDCPacket.parseVCPReply(
+        validReply(current: 0x1234, maximum: 0xABCD), expectedCode: 0x10),
+      DDCValue(current: 0x1234, maximum: 0xABCD)
+    )
+  }
+
+  func testUnsupportedVCPResultThrowsUnsupported() {
+    let reply = invalidReply(changing: 3, to: 0x01)
+
+    XCTAssertThrowsError(try DDCPacket.parseVCPReply(reply, expectedCode: 0x10)) {
+      XCTAssertEqual($0 as? DisplayControlError, .ddcUnsupported)
+    }
+  }
+
+  func testUnknownNonzeroVCPResultIsInvalid() {
+    assertInvalidResponse(invalidReply(changing: 3, to: 0x02), expectedCode: 0x10)
+  }
+
   func testRejectsMalformedVCPReplies() {
     var badChecksum = validReply(current: 50, maximum: 100)
     badChecksum[badChecksum.count - 1] ^= 0xFF
+    let trailingByte = validReply(current: 50, maximum: 100) + [0x00]
     let malformedReplies = [
-      [0x6E, 0x88, 0x02],
-      invalidReply(changing: 1, to: 0x87),
-      invalidReply(changing: 0, to: 0x50),
-      invalidReply(changing: 2, to: 0x03),
-      invalidReply(changing: 4, to: 0x12),
-      invalidReply(changing: 3, to: 0x01),
-      badChecksum,
+      ("short", [0x6E, 0x88, 0x02]),
+      ("unencoded length", invalidReply(changing: 1, to: 0x08)),
+      ("length mismatch", invalidReply(changing: 1, to: 0x87)),
+      ("trailing byte", trailingByte),
+      ("wrong source", invalidReply(changing: 0, to: 0x50)),
+      ("wrong opcode", invalidReply(changing: 2, to: 0x03)),
+      ("wrong VCP code", invalidReply(changing: 4, to: 0x12)),
+      ("bad checksum", badChecksum),
     ]
 
-    for reply in malformedReplies {
-      assertInvalidResponse(reply, expectedCode: 0x10)
+    for (name, reply) in malformedReplies {
+      assertInvalidResponse(reply, expectedCode: 0x10, label: name)
     }
   }
 
@@ -64,6 +86,67 @@ final class DDCTests: XCTestCase {
     XCTAssertThrowsError(try DDCServiceMatcher.select(for: identity, from: [internalCandidate])) {
       XCTAssertEqual($0 as? DisplayControlError, .ddcServiceNotFound)
     }
+  }
+
+  func testRejectsWeakCandidateAboveOldThreshold() {
+    let identity = displayIdentity()
+    let weak = service(id: 1, edidUUID: nil, serial: nil, displayLocation: nil)
+
+    XCTAssertGreaterThan(DDCServiceMatcher.score(weak, for: identity), 50)
+    assertServiceNotFound(identity, candidates: [weak])
+  }
+
+  func testAcceptsEachStrongIdentityMatchIndependently() throws {
+    let cases = [
+      (
+        sparseIdentity(displayLocation: 0x1234),
+        sparseService(id: 1, displayLocation: 0x1234)
+      ),
+      (sparseIdentity(serial: " Serial-1 "), sparseService(id: 2, serial: "serial-1")),
+      (sparseIdentity(edidUUID: " EDID-1 "), sparseService(id: 3, edidUUID: "edid-1")),
+    ]
+
+    for (identity, candidate) in cases {
+      XCTAssertEqual(try DDCServiceMatcher.select(for: identity, from: [candidate]), candidate)
+    }
+    XCTAssertEqual(
+      DDCServiceMatcher.score(cases[2].1, for: cases[2].0), DDCServiceMatcher.minimumScore)
+  }
+
+  func testRejectsConflictInAnyProvidedStrongIdentity() {
+    let identity = sparseIdentity(edidUUID: "EDID-1", serial: "SERIAL-1", displayLocation: 0x1234)
+    let conflicts = [
+      sparseService(id: 1, edidUUID: "EDID-1", serial: "SERIAL-1", displayLocation: 0x9999),
+      sparseService(id: 2, edidUUID: "EDID-1", serial: "OTHER", displayLocation: 0x1234),
+      sparseService(id: 3, edidUUID: "OTHER", serial: "SERIAL-1", displayLocation: 0x1234),
+    ]
+
+    for conflict in conflicts {
+      assertServiceNotFound(identity, candidates: [conflict])
+    }
+  }
+
+  func testConflictFreeCandidateWinsRegardlessOfInputOrder() throws {
+    let identity = displayIdentity()
+    let conflicting = service(id: 1, displayLocation: 0x9999)
+    let correct = sparseService(id: 2, serial: " serial-1 ")
+
+    XCTAssertGreaterThan(
+      DDCServiceMatcher.score(conflicting, for: identity),
+      DDCServiceMatcher.score(correct, for: identity)
+    )
+    XCTAssertEqual(
+      try DDCServiceMatcher.select(for: identity, from: [conflicting, correct]), correct)
+    XCTAssertEqual(
+      try DDCServiceMatcher.select(for: identity, from: [correct, conflicting]), correct)
+  }
+
+  func testBelowThresholdWeakCandidateIsRejected() {
+    let identity = sparseIdentity(productName: "Reference Display")
+    let weak = sparseService(id: 1, productName: " reference  display ")
+
+    XCTAssertLessThan(DDCServiceMatcher.score(weak, for: identity), DDCServiceMatcher.minimumScore)
+    assertServiceNotFound(identity, candidates: [weak])
   }
 
   func testEmptyAndZeroCandidateIdentityFieldsDoNotAddScore() {
@@ -130,11 +213,13 @@ final class DDCTests: XCTestCase {
   private func assertInvalidResponse(
     _ reply: [UInt8],
     expectedCode: UInt8,
+    label: String = "invalid response",
     file: StaticString = #filePath,
     line: UInt = #line
   ) {
     XCTAssertThrowsError(
       try DDCPacket.parseVCPReply(reply, expectedCode: expectedCode),
+      label,
       file: file,
       line: line
     ) {
@@ -142,6 +227,62 @@ final class DDCTests: XCTestCase {
         return XCTFail("Expected ddcInvalidResponse, got \($0)", file: file, line: line)
       }
     }
+  }
+
+  private func assertServiceNotFound(
+    _ identity: DDCDisplayIdentity,
+    candidates: [DDCServiceCandidate],
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) {
+    XCTAssertThrowsError(
+      try DDCServiceMatcher.select(for: identity, from: candidates), file: file, line: line
+    ) {
+      XCTAssertEqual($0 as? DisplayControlError, .ddcServiceNotFound, file: file, line: line)
+    }
+  }
+
+  private func sparseIdentity(
+    edidUUID: String? = nil,
+    productName: String? = nil,
+    serial: String? = nil,
+    displayLocation: UInt64? = nil
+  ) -> DDCDisplayIdentity {
+    DDCDisplayIdentity(
+      edidUUID: edidUUID,
+      productName: productName,
+      serial: serial,
+      displayLocation: displayLocation,
+      vendorID: nil,
+      productID: nil,
+      manufactureWeek: nil,
+      manufactureYear: nil,
+      physicalWidthMM: nil,
+      physicalHeightMM: nil
+    )
+  }
+
+  private func sparseService(
+    id: UInt64,
+    edidUUID: String? = nil,
+    productName: String? = nil,
+    serial: String? = nil,
+    displayLocation: UInt64? = nil
+  ) -> DDCServiceCandidate {
+    DDCServiceCandidate(
+      serviceID: id,
+      isExternal: true,
+      edidUUID: edidUUID,
+      productName: productName,
+      serial: serial,
+      displayLocation: displayLocation,
+      vendorID: nil,
+      productID: nil,
+      manufactureWeek: nil,
+      manufactureYear: nil,
+      physicalWidthMM: nil,
+      physicalHeightMM: nil
+    )
   }
 
   private func displayIdentity(

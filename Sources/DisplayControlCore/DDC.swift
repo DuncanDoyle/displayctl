@@ -46,11 +46,16 @@ enum DDCPacket {
     guard reply[2] == 0x02 else {
       throw invalidResponse("VCP reply has an unexpected opcode")
     }
-    guard reply[3] == 0 else {
-      throw invalidResponse("VCP reply reports an unsupported VCP code")
-    }
     guard reply[4] == expectedCode else {
       throw invalidResponse("VCP reply contains an unexpected VCP code")
+    }
+    switch reply[3] {
+    case 0x00:
+      break
+    case 0x01:
+      throw DisplayControlError.ddcUnsupported
+    default:
+      throw invalidResponse("VCP reply contains an unknown result code")
     }
 
     let maximum = UInt16(reply[6]) << 8 | UInt16(reply[7])
@@ -97,8 +102,8 @@ struct DDCServiceCandidate: Equatable, Sendable {
 }
 
 enum DDCServiceMatcher {
-  // A candidate must match at least one stable hardware identity signal.
-  static let minimumScore = 50
+  // An EDID identity match is the minimum acceptable strong match.
+  static let minimumScore = 60
 
   private static let displayLocationWeight = 100
   private static let serialWeight = 80
@@ -113,7 +118,7 @@ enum DDCServiceMatcher {
   ) throws -> DDCServiceCandidate {
     let scored =
       candidates
-      .filter(\.isExternal)
+      .filter { $0.isExternal && isEligible($0, for: display) }
       .map { ($0, score($0, for: display)) }
     guard let bestScore = scored.map(\.1).max(), bestScore >= minimumScore else {
       throw DisplayControlError.ddcServiceNotFound
@@ -132,7 +137,7 @@ enum DDCServiceMatcher {
     if nonzeroEqual(candidate.displayLocation, display.displayLocation) {
       score += displayLocationWeight
     }
-    if nonemptyExact(candidate.serial, display.serial) {
+    if identityTokenEqual(candidate.serial, display.serial) {
       score += serialWeight
     }
     let edidMatches = identityTokenEqual(candidate.edidUUID, display.edidUUID)
@@ -142,9 +147,9 @@ enum DDCServiceMatcher {
     if edidMatches || vendorAndProductMatch {
       score += hardwareIdentityWeight
     }
-    if normalizedName(candidate.productName) == normalizedName(display.productName),
-      normalizedName(candidate.productName) != nil
-    {
+    let candidateName = normalizedName(candidate.productName)
+    let displayName = normalizedName(display.productName)
+    if let candidateName, candidateName == displayName {
       score += normalizedNameWeight
     }
     if nonzeroEqual(candidate.manufactureWeek, display.manufactureWeek),
@@ -161,24 +166,43 @@ enum DDCServiceMatcher {
     return score
   }
 
-  private static func nonemptyExact(_ lhs: String?, _ rhs: String?) -> Bool {
-    guard let lhs = nonemptyToken(lhs), let rhs = nonemptyToken(rhs) else {
+  private static func isEligible(
+    _ candidate: DDCServiceCandidate,
+    for display: DDCDisplayIdentity
+  ) -> Bool {
+    let hasConflict =
+      nonzeroConflict(candidate.displayLocation, display.displayLocation)
+      || identityTokenConflict(candidate.serial, display.serial)
+      || identityTokenConflict(candidate.edidUUID, display.edidUUID)
+    guard !hasConflict else { return false }
+
+    return nonzeroEqual(candidate.displayLocation, display.displayLocation)
+      || identityTokenEqual(candidate.serial, display.serial)
+      || identityTokenEqual(candidate.edidUUID, display.edidUUID)
+  }
+
+  private static func identityTokenEqual(_ lhs: String?, _ rhs: String?) -> Bool {
+    guard let lhs = normalizedIdentityToken(lhs), let rhs = normalizedIdentityToken(rhs) else {
       return false
     }
     return lhs == rhs
   }
 
-  private static func identityTokenEqual(_ lhs: String?, _ rhs: String?) -> Bool {
-    guard let lhs = nonemptyToken(lhs), let rhs = nonemptyToken(rhs) else {
+  private static func identityTokenConflict(_ lhs: String?, _ rhs: String?) -> Bool {
+    guard let lhs = normalizedIdentityToken(lhs), let rhs = normalizedIdentityToken(rhs) else {
       return false
     }
-    return lhs.caseInsensitiveCompare(rhs) == .orderedSame
+    return lhs != rhs
   }
 
   private static func nonemptyToken(_ value: String?) -> String? {
     guard let value else { return nil }
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return normalized.isEmpty ? nil : normalized
+  }
+
+  private static func normalizedIdentityToken(_ value: String?) -> String? {
+    nonemptyToken(value)?.lowercased()
   }
 
   private static func normalizedName(_ value: String?) -> String? {
@@ -194,5 +218,10 @@ enum DDCServiceMatcher {
   private static func nonzeroEqual<T>(_ lhs: T?, _ rhs: T?) -> Bool where T: BinaryInteger {
     guard let lhs, let rhs, lhs != 0, rhs != 0 else { return false }
     return lhs == rhs
+  }
+
+  private static func nonzeroConflict<T>(_ lhs: T?, _ rhs: T?) -> Bool where T: BinaryInteger {
+    guard let lhs, let rhs, lhs != 0, rhs != 0 else { return false }
+    return lhs != rhs
   }
 }
