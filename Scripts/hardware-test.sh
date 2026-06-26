@@ -10,8 +10,11 @@ SCRIPT_DIR="${0:A:h}"
 REPO_ROOT="${SCRIPT_DIR:h}"
 cd "$REPO_ROOT"
 
+export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/tmp/displaycontrol-hardware-module-cache}"
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/displaycontrol-hardware-clang-cache}"
+
 print -- "Building displayctl..."
-swift build
+swift build --disable-sandbox
 DISPLAYCTL="$REPO_ROOT/.build/debug/displayctl"
 EXPECTED_LIST_HEADER=$'UUID\truntimeID\tname\tkind\tonline\tactive\tmain\tDDC'
 
