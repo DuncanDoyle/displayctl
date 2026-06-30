@@ -120,16 +120,22 @@ confirmation before every brightness or connection mutation. Its exit/signal
 trap attempts `connect all`; it never uses a force override. USB-C recabling and
 logout/login remain manual because automating them would be unsafe or impossible.
 
-Hardware validation has **not yet been executed in an interactive user session**.
-No item below should be read as a pass. During Task 10, record observed evidence
-for every item rather than converting unrun checks into successes:
+Hardware validation was partially executed in an interactive user session on
+2026-06-30 with the built-in display and a Dell U2720Q attached over HDMI.
+Record observed evidence for every item rather than converting unrun checks into
+successes:
 
-- [ ] Build completes on the Tahoe 26.5 M5 target.
+- [x] Build completes on the Tahoe 26.5 M5 target.
 - [ ] Automated tests pass on the target.
-- [ ] Interactive `list` shows internal and HDMI displays with stable UUIDs.
-- [ ] HDMI brightness get succeeds, or unsupported read-back is recorded.
-- [ ] HDMI brightness set is visually confirmed on the physical monitor.
+- [x] Interactive `list` shows internal and HDMI displays with stable UUIDs.
+- [x] HDMI brightness get succeeds, or unsupported read-back is recorded.
+- [x] HDMI brightness set is visually confirmed on the physical monitor.
 - [ ] The external display disconnects and reconnects.
+  - 2026-06-30 HDMI result: external disconnect returned
+    `postconditionFailed` because the disabled display disappeared from the
+    refreshed inventory. The trap's `connect all` completed but did not restore
+    the HDMI display; unplug/replug did not recover HDMI, and reboot was
+    required. USB-C still worked after the HDMI failure.
 - [ ] The internal display disconnects and reconnects.
 - [ ] Disconnecting the final active display is refused with a nonzero exit.
 - [ ] USB-C DDC is manually tested after recabling and its result is recorded.

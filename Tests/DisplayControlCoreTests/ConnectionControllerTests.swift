@@ -221,6 +221,21 @@ final class ConnectionControllerTests: XCTestCase {
     }
   }
 
+  func testDisconnectRollsBackWhenDisabledDisplayDisappearsFromInventory() {
+    let store = FakeDisplayStore([
+      fixture(1, active: true, kind: .external),
+      fixture(2, active: true),
+    ])
+    store.removeAfterDisable = true
+    store.restoreRemovedOnEnable = true
+
+    XCTAssertThrowsError(try controller(store).disconnect("1")) {
+      assertPostcondition($0, contains: ["0 matches", "rollback enabled true"])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
+    XCTAssertEqual(store.displays.first { $0.runtimeID == 1 }?.isActive, true)
+  }
+
   func testCoreGraphicsTransactionCancelsEveryFailureAfterBegin() {
     for stage in TransactionStage.allCases {
       let api = FakeTransactionAPI(failingAt: stage)
@@ -305,6 +320,9 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
   var activateWhenEnabled: [UInt32: UInt32] = [:]
   var duplicateAfterMutation = false
   var removeAfterMutation = false
+  var removeAfterDisable = false
+  var restoreRemovedOnEnable = false
+  private var removedDisplays: [UInt32: Display] = [:]
 
   init(_ displays: [Display]) {
     self.displays = displays
@@ -324,6 +342,12 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
     if failureIDs.contains(displayID) {
       throw DisplayControlError.configurationFailed("fake failure \(displayID)")
     }
+    if enabled, restoreRemovedOnEnable,
+      let removedDisplay = removedDisplays.removeValue(forKey: displayID)
+    {
+      displays.append(replacing(removedDisplay, active: true))
+      return
+    }
     guard appliesChanges, let index = displays.firstIndex(where: { $0.runtimeID == displayID })
     else {
       return
@@ -336,6 +360,10 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
     }
     if duplicateAfterMutation {
       displays.append(displays[index])
+    }
+    if removeAfterDisable, !enabled {
+      removedDisplays[displayID] = displays[index]
+      displays.remove(at: index)
     }
     if removeAfterMutation {
       displays.remove(at: index)

@@ -173,26 +173,53 @@ public struct ConnectionController: Sendable {
     do {
       refreshed = try snapshot.snapshot()
     } catch {
-      throw DisplayControlError.postconditionFailed(
+      throw postconditionFailure(
         "Display \(display.uuid.uuidString) refresh failed after requesting enabled "
-          + "\(enabled): \(error)"
+          + "\(enabled): \(error)",
+        display: display,
+        enabled: enabled
       )
     }
 
     let matches = refreshed.filter { $0.uuid == display.uuid }
     guard matches.count == 1, let result = matches.first else {
-      throw DisplayControlError.postconditionFailed(
+      throw postconditionFailure(
         "Display \(display.uuid.uuidString) had \(matches.count) matches after requesting "
-          + "enabled \(enabled)"
+          + "enabled \(enabled)",
+        display: display,
+        enabled: enabled
       )
     }
     guard result.isActive == enabled else {
       let state = enabled ? "active" : "inactive"
-      throw DisplayControlError.postconditionFailed(
-        "Display \(display.uuid.uuidString) did not become \(state)"
+      throw postconditionFailure(
+        "Display \(display.uuid.uuidString) did not become \(state)",
+        display: display,
+        enabled: enabled
       )
     }
     return result
+  }
+
+  private func postconditionFailure(
+    _ message: String,
+    display: Display,
+    enabled: Bool
+  ) -> DisplayControlError {
+    guard !enabled else {
+      return .postconditionFailed(message)
+    }
+
+    do {
+      try hardware.setEnabled(display.runtimeID, enabled: true)
+      return .postconditionFailed(
+        "\(message); rollback enabled true completed for display \(display.runtimeID)"
+      )
+    } catch {
+      return .postconditionFailed(
+        "\(message); rollback enabled true failed for display \(display.runtimeID): \(error)"
+      )
+    }
   }
 }
 
