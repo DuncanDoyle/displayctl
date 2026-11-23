@@ -32,7 +32,7 @@ Brief: docs/phases/phase-1/phase-1.1-brief.md
 Ledger, `connect` changes, `forget`, hardware-test watchdog, tests and docs, per the brief.
 
 ### Not allowed
-Design changes beyond D-003 without a new decisions.md entry and user approval; DDC changes; Phase 2 work.
+Design changes beyond D-003 to D-006 without a new decisions.md entry and user approval; Phase 2 work. DDC changes only as Task 10 hardware-verification fixes (USB-C), as recorded in the brief.
 
 ### Queue
 - [x] Codex review of the D-003 design amendment + brief — reviews/1.1-design-codex.md, 8 accepted, D-004
@@ -61,3 +61,4 @@ none
 - 2026-11-23 run 3 (run.qYsAha): full scripted matrix passed on HDMI — brightness, internal and external round trips (Dell left the online list; restored from the ledger), final-display refusal. Open: unattended run, USB-C, logout/login, manual connect all.
 - 2026-11-23 USB-C (Dell UUID B3564974…, runtime ID 3): reads failed with DDC null messages (`6e 80 be`) until the request was written twice before the read; fixed, live read 25/100. Brightness set over USB-C awaiting user observation.
 - 2026-11-23 run 4 over USB-C (run.SWPUBE): brightness get 25 and set 10 confirmed (after doubled DDC writes); internal and external round trips passed; final-display refusal passed; the user withheld the last YES and the watchdog restored the Dell from the ledger (counts as the unattended run).
+- 2026-11-23 procedure deviation: the unattended watchdog run happened at the end of run 4 (after the external steps), not as a separate run before external opt-in as Task 10 lists. The behaviour was observed; only the order differs.

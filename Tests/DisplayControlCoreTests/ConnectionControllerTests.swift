@@ -343,6 +343,23 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(store.requests, [.init(id: 3, enabled: true)])
   }
 
+  func testConnectKindSelectorWithUnreadableLedgerNamesRecoveryRoutes() {
+    let inactive = fixture(2, active: false, kind: .external)
+    let store = FakeDisplayStore([fixture(1, active: true), inactive])
+    let ledger = FakeLedger()
+    ledger.loadError = .configurationFailed("Unable to decode display ledger")
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).connect("external")) {
+      XCTAssertEqual(
+        $0 as? DisplayControlError,
+        .configurationFailed(
+          "Unable to decode display ledger; use connect <UUID>, connect all, or forget all"
+        )
+      )
+    }
+    XCTAssertEqual(store.requests, [])
+  }
+
   // Acceptance test 1.
   func testLaterConnectAllRestoresDisplayWhoseRollbackFailed() throws {
     let directory = uniqueStateDirectory()

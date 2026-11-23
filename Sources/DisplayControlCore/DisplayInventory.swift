@@ -105,7 +105,12 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         )
       }
 
-      let isActive = activeIDSet.contains(displayID) && displayMetadata.isActive
+      // The active list and CGDisplayIsActive are separate calls; disagreement means the topology moved.
+      let isActive = activeIDSet.contains(displayID)
+      guard isActive == displayMetadata.isActive else {
+        throw DisplayControlError.configurationFailed(
+          "Display inventory changed while sampling; retry")
+      }
       let kind: DisplayKind = displayMetadata.isBuiltIn ? .internal : .external
       let fallbackName =
         displayMetadata.isBuiltIn

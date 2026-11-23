@@ -12,7 +12,7 @@ final class DisplayInventoryTests: XCTestCase {
     let result = try DisplayInventory.makeDisplays(
       onlineIDs: [1, 2],
       activeIDs: [2],
-      metadata: metadata()
+      metadata: metadata(inactive: [1])
     )
 
     XCTAssertEqual(result.map(\.runtimeID), [1, 2])
@@ -50,32 +50,27 @@ final class DisplayInventoryTests: XCTestCase {
     let result = try DisplayInventory.makeDisplays(
       onlineIDs: [1, 2],
       activeIDs: [1],
-      metadata: metadata()
+      metadata: metadata(inactive: [2])
     )
 
     XCTAssertEqual(result.first { $0.runtimeID == 2 }?.isActive, false)
   }
 
-  func testMetadataInactiveOverridesActiveListMembership() throws {
-    var displayMetadata = metadata()
-    displayMetadata[1] = DisplayMetadata(
-      uuid: internalUUID,
-      isBuiltIn: true,
-      isActive: false,
-      isMain: true,
-      vendorNumber: 0,
-      modelNumber: 0,
-      localizedName: "Internal Panel"
-    )
-
-    let result = try DisplayInventory.makeDisplays(
-      onlineIDs: [1],
-      activeIDs: [1],
-      metadata: displayMetadata
-    )
-
-    XCTAssertEqual(result.first?.isActive, false)
-    XCTAssertEqual(result.first?.isMain, false)
+  func testActiveListAndPerDisplayCheckDisagreeingFailsAsInconsistent() {
+    // Listed active but CGDisplayIsActive false, then the reverse.
+    for (activeIDs, inactive) in [([UInt32(1)], Set<UInt32>([1])), ([], [])] {
+      XCTAssertThrowsError(
+        try DisplayInventory.makeDisplays(
+          onlineIDs: [1],
+          activeIDs: activeIDs,
+          metadata: metadata(inactive: inactive)
+        )
+      ) {
+        XCTAssertEqual(
+          $0 as? DisplayControlError,
+          .configurationFailed("Display inventory changed while sampling; retry"))
+      }
+    }
   }
 
   func testEmptyOnlineInventoryReturnsNoDisplays() throws {
@@ -296,7 +291,8 @@ final class DisplayInventoryTests: XCTestCase {
     let result = try DisplayInventory.makeDisplays(
       onlineIDs: [1, 2],
       activeIDs: [1],
-      metadata: metadata(localizedNames: [1: "Internal Panel", 2: "Inactive Screen"])
+      metadata: metadata(
+        localizedNames: [1: "Internal Panel", 2: "Inactive Screen"], inactive: [2])
     )
 
     XCTAssertEqual(result.first { $0.runtimeID == 1 }?.name, "Internal Panel")
@@ -364,7 +360,8 @@ final class DisplayInventoryTests: XCTestCase {
   }
 
   private func metadata(
-    localizedNames: [UInt32: String] = [1: "Internal Panel", 2: "Studio Display"]
+    localizedNames: [UInt32: String] = [1: "Internal Panel", 2: "Studio Display"],
+    inactive: Set<UInt32> = []
   )
     -> [UInt32: DisplayMetadata]
   {
@@ -372,7 +369,7 @@ final class DisplayInventoryTests: XCTestCase {
       1: DisplayMetadata(
         uuid: internalUUID,
         isBuiltIn: true,
-        isActive: true,
+        isActive: !inactive.contains(1),
         isMain: true,
         vendorNumber: 0,
         modelNumber: 0,
@@ -381,7 +378,7 @@ final class DisplayInventoryTests: XCTestCase {
       2: DisplayMetadata(
         uuid: externalUUID,
         isBuiltIn: false,
-        isActive: true,
+        isActive: !inactive.contains(2),
         isMain: false,
         vendorNumber: 610,
         modelNumber: 0x1234,

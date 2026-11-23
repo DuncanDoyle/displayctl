@@ -39,7 +39,7 @@ Goal: no disconnect done by `displayctl` can leave a display that only a reboot 
 
 ## Acceptance tests
 At the `ConnectionController` boundary with the existing fake hardware, plus the CLI parser. The fake must not restore a display just because its old ID is called; each test sets up what macOS does.
-1. Disconnect drops the display, the immediate rollback fails; a later `connect all` (new controller, same ledger file) restores that UUID.
+1. Disconnect whose post-disable refresh fails, and whose immediate rollback also fails; a later `connect all` (new controller, same ledger file) restores that UUID. (A display that only drops out of the list is a verified disconnect, D-005.)
 2. `connect <uuid>` for a ledger-only display succeeds and empties the entry.
 3. Same UUID online under a new runtime ID → the new ID is enabled.
 4. Recorded ID now held by another UUID → no mutation, reported.

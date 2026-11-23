@@ -70,7 +70,7 @@ displayctl brightness set <selector> <0...100>
 Canonical selectors are a stable display UUID or the current decimal runtime
 display ID. `internal` and `external` are convenience selectors and work only
 when exactly one display of that kind matches. Display names are informational,
-not selectors. `all` is accepted only by `connect all`.
+not selectors. `all` is accepted only by `connect all`. For `connect`, the candidates for `internal` or `external` are the inactive displays of that kind plus displays of that kind that `displayctl` turned off; exactly one must match, so with two external monitors use the UUID.
 
 ```sh
 .build/debug/displayctl list

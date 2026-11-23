@@ -111,7 +111,7 @@ Stable UUID is the canonical identifier. Runtime display IDs can change and are 
 
 Soft-disconnected displays must remain discoverable through the online display inventory for reconnection. If Tahoe does not expose a disabled display through that inventory, Phase 1 stabilization must add the smallest persistent identity record needed for recovery before the connect command is considered complete.
 
-### 6.2 Display selector
+Soft-disconnected displays leave the online display inventory on macOS 26.5 and 27 (D-005). The ledger (§6.3.1) is the persistent identity record that makes them reachable again.
 
 Commands accept:
 
@@ -121,7 +121,7 @@ Commands accept:
 - `external` when exactly one external display matches.
 - `all` only for the recovery-oriented `connect all` command.
 
-Ambiguous or missing selections produce explicit errors. State validation is command-specific: `connect` requires an inactive display, while `disconnect` requires an active display. Display names are reported but are not canonical selectors because names may be duplicated or localized.
+Ambiguous or missing selections produce explicit errors. State validation is command-specific: `connect` requires an inactive display, while `disconnect` requires an active display. For `connect`, a kind selector matches among inactive online displays of that kind plus ledger entries of that kind that are not online, and needs exactly one candidate. Display names are reported but are not canonical selectors because names may be duplicated or localized.
 
 ### 6.3 Connection controller
 

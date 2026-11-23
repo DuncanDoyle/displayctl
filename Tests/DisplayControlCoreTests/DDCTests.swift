@@ -575,7 +575,7 @@ final class DDCTests: XCTestCase {
     XCTAssertEqual(events, ["write \(packet)", "sleep 10000", "write \(packet)"])
   }
 
-  func testSetSucceedsWhenRepeatedWriteFails() throws {
+  func testSetPropagatesRepeatedWriteFailure() {
     var writes = 0
     let exchange = DDCExchange(
       write: { _ in
@@ -586,7 +586,9 @@ final class DDCTests: XCTestCase {
       sleep: { _ in }
     )
 
-    try exchange.writeVCP(code: 0x10, value: 50)
+    XCTAssertThrowsError(try exchange.writeVCP(code: 0x10, value: 50)) { error in
+      XCTAssertEqual(error as? DisplayControlError, .ddcTimeout)
+    }
     XCTAssertEqual(writes, 2)
   }
 

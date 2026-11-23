@@ -811,8 +811,9 @@ struct DDCExchange {
 
   func readVCP(code: UInt8) throws -> DDCValue {
     // Some monitors over USB-C answer a single GET with a null message; a repeated request gets a reply.
+    // A failed repeat is ignored here because the reply is validated.
     let request = DDCPacket.readVCP(code: code)
-    try writeTwice(request)
+    try writeTwice(request, repeatMustSucceed: false)
     sleep(Self.replyDelayMicroseconds)
 
     let reply = try read(Self.maximumReplyLength)
@@ -826,17 +827,21 @@ struct DDCExchange {
     return try DDCPacket.parseVCPReply(Array(reply.prefix(exactLength)), expectedCode: code)
   }
 
-  // The same monitors ignore a single SET too.
+  // The same monitors ignore a single SET too, so a failed repeat fails the SET and the caller retries the pair.
   func writeVCP(code: UInt8, value: UInt16) throws {
-    try writeTwice(DDCPacket.writeVCP(code: code, value: value))
+    try writeTwice(DDCPacket.writeVCP(code: code, value: value), repeatMustSucceed: true)
   }
 
-  /// The first write's error propagates; the repeat is best effort.
+  /// Sends the packet twice; the first write's error always propagates.
   /// Repeating is only safe for absolute values such as luminance (VCP 0x10).
-  private func writeTwice(_ packet: [UInt8]) throws {
+  private func writeTwice(_ packet: [UInt8], repeatMustSucceed: Bool) throws {
     try write(packet)
     sleep(Self.requestRepeatDelayMicroseconds)
-    try? write(packet)
+    if repeatMustSucceed {
+      try write(packet)
+    } else {
+      try? write(packet)
+    }
   }
 }
 

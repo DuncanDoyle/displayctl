@@ -206,8 +206,16 @@ public struct ConnectionController: Sendable {
     let online = displays.filter { $0.kind == kind }
     let onlineUUIDs = Set(online.map(\.uuid))
     let inactive = online.filter { !$0.isActive }
+    let entries: [DisabledDisplayEntry]
+    do {
+      entries = try ledger.load()
+    } catch {
+      throw DisplayControlError.configurationFailed(
+        "\(Self.message(error)); use connect <UUID>, connect all, or forget all"
+      )
+    }
     var ledgerOnly: [DisabledDisplayEntry] = []
-    for entry in try ledger.load()
+    for entry in entries
     where entry.kind == kind && !onlineUUIDs.contains(entry.uuid)
       && !ledgerOnly.contains(where: { $0.uuid == entry.uuid })
     {
