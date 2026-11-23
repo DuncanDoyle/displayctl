@@ -4,7 +4,7 @@
 
 - Phase: 1 — CLI hardware validation
 - Status: Approved design
-- Initial platform: Apple Silicon M5 Mac running macOS Tahoe 26.5
+- Initial platform: Apple Silicon M5 Mac running macOS Tahoe 26.5; now macOS 27.0.1 (D-002)
 - Initial display connections: HDMI, with USB-C compatibility evaluated separately
 - Language: Swift
 
@@ -142,6 +142,15 @@ If configuration fails before completion, the transaction is cancelled. Session-
 
 The operation lock uses Darwin `flock` on a lock file in the logged-in user's temporary directory. It serializes the complete validation and mutation sequence across threads, controller instances, and CLI processes. Acquisition uses bounded waiting and fails clearly rather than hanging indefinitely. The operating system releases the advisory lock when a process exits or crashes.
 
+#### 6.3.1 Disabled-display ledger (D-003)
+
+macOS can drop a soft-disabled display from the online display list, so the inventory alone cannot always find it again. The controller therefore keeps a per-user ledger file of displays that `displayctl` disabled:
+
+- A disconnect records the display's UUID, runtime ID and name in the ledger before invoking `CGSConfigureDisplayEnabled`, under the operation lock. If recording fails, the disconnect does not happen.
+- A connect resolves its selector against the inventory and the ledger. A ledger entry that macOS no longer lists as online is still a valid target: the controller re-enables its recorded runtime ID.
+- An entry is removed only once the display is verified active again, or when the user removes it explicitly because the display was physically unplugged.
+- The ledger survives process exit. Entries left over from a previous login session or boot are still tried by `connect all`; a failure on a stale entry is reported, not fatal.
+
 There is no force option for disconnecting the final active display. `connect all` is idempotent: a candidate that becomes active before its turn is treated as a successful recovery. Every `connect all` outcome carries the original candidate display identity alongside its typed success or failure so callers can report results independently.
 
 ### 6.4 DDC service matching
@@ -201,9 +210,9 @@ Mutation commands print the resolved display identity and verified resulting sta
 
 ### 7.3 Recovery command
 
-`displayctl connect all` attempts to enable every physically connected, online, soft-disabled display. It reports each result independently and returns failure if any requested reconnection fails.
+`displayctl connect all` attempts to enable every online soft-disabled display, plus every ledger entry (§6.3.1), including entries macOS no longer lists as online. It reports each result independently and returns failure if any requested reconnection fails.
 
-This command does not bypass symbol availability checks and does not attempt to fabricate displays that the operating system no longer exposes.
+This command does not bypass symbol availability checks. It never invents runtime IDs: the only offline displays it targets are those recorded in the ledger.
 
 ## 8. Safety and Error Handling
 
@@ -269,6 +278,8 @@ The M5/Tahoe 26.5 validation matrix includes:
 6. Verify refusal to disconnect the final active display.
 7. Run the DDC checks over USB-C and record supported or unsupported status.
 8. Verify logout/login recovery for session-scoped display configuration.
+
+Before each disconnect, the hardware test arms a watchdog that runs `displayctl connect all` after a short timeout (default 20 s) unless the user confirms in time that they can see and use a display. The watchdog runs detached from the test's foreground flow, so it fires even when the user cannot type. The internal display is tested before the external one (D-003).
 
 Tests must restore the initial display state when possible. Failures must print manual recovery instructions, including `displayctl connect all` and logout/login.
 
