@@ -130,8 +130,18 @@ struct CLIApplication: Sendable {
       displayctl brightness set <selector> <0...100>
 
     Selectors: display UUID, runtime display ID, internal, or external.
-    connect also accepts the UUID of a display that disconnect recorded and macOS no longer lists.
+    A disconnected display leaves macOS's display list; connect still finds it by
+    UUID, internal, or external. connect all brings back every display it turned off.
     forget drops recorded displays without changing any display.
+    The last active display is never disconnected.
+
+    Examples:
+      displayctl disconnect internal         # turn off the built-in screen
+      displayctl connect internal            # turn it back on
+      displayctl brightness set external 40  # hardware brightness via DDC/CI
+      displayctl brightness get external
+
+    Exit codes: 0 ok, 64 usage, 69 unsupported, 75 temporary DDC failure, 1 other.
     """
   private let service: any CLIService
   init(service: any CLIService) { self.service = service }

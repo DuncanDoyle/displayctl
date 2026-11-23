@@ -17,6 +17,35 @@ The executable is self-contained and has no BetterDisplay runtime dependency.
 It does not copy BetterDisplay implementation details. Brightness operations use
 monitor hardware DDC/CI only: there is no software gamma or overlay fallback.
 
+## Install
+
+```sh
+swift build -c release
+cp .build/release/displayctl ~/.local/bin/   # any directory on your PATH
+```
+
+Rebuild and copy again after pulling changes.
+
+## Everyday use
+
+```sh
+displayctl list                          # displays, their UUIDs and state
+displayctl disconnect internal           # turn off the built-in screen
+displayctl connect internal              # turn it back on
+displayctl brightness get external       # read the monitor's brightness
+displayctl brightness set external 40    # set it, 0 to 100
+```
+
+A disconnected display disappears from `list`; `displayctl` remembers it, so `connect internal` still works. The last active display is never turned off. Logging out should restore every display; that is not yet verified on macOS 27.
+
+If a screen does not come back:
+
+1. Run `displayctl connect all`.
+2. Log out and back in.
+3. Reboot only as a last resort.
+
+Brightness works over HDMI and USB-C on a Dell U2720Q (macOS 27.0.1). Other monitors need DDC/CI enabled in their own menu.
+
 ## Build and test
 
 ```sh
@@ -24,19 +53,6 @@ swift build
 swift test
 .build/debug/displayctl --help
 ```
-
-In a restricted sandbox, SwiftPM's user caches can stall or be unavailable. Use
-local temporary caches and disable SwiftPM's own sandbox:
-
-```sh
-env \
-  SWIFTPM_MODULECACHE_OVERRIDE=/tmp/displaycontrol-module-cache \
-  CLANG_MODULE_CACHE_PATH=/tmp/displaycontrol-clang-cache \
-  swift test --disable-sandbox --scratch-path /tmp/displaycontrol-build
-```
-
-Use the same environment with `swift build` in place of `swift test` when the
-build itself needs the workaround.
 
 ## CLI usage
 
