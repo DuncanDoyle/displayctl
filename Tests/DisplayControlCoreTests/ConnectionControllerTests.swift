@@ -620,16 +620,6 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(api.completeOptions, [.forSession])
   }
 
-  // Acceptance test 9 (Core part).
-  func testAppOnlyScopeCompletesTransactionForAppOnly() throws {
-    let api = FakeTransactionAPI()
-
-    try CoreGraphicsDisplayConnectionHardware(api: api.functions, scope: .appOnly)
-      .setEnabled(7, enabled: false)
-
-    XCTAssertEqual(api.completeOptions, [.forAppOnly])
-  }
-
   func testCoreGraphicsTransactionCancelsNilConfigAndResolutionFailure() {
     for api in [FakeTransactionAPI(nilConfig: true), FakeTransactionAPI(enableThrows: true)] {
       XCTAssertThrowsError(

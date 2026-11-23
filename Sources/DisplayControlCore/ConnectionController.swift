@@ -437,31 +437,18 @@ public struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
   }
 }
 
-/// How long a display configuration change lasts.
-public enum DisplayConfigurationScope: Sendable {
-  /// Until logout (`CGConfigureOption.forSession`).
-  case session
-  /// Until this process exits (`CGConfigureOption.forAppOnly`); used by trial disconnects.
-  case appOnly
-}
-
+/// Completes each change for the login session (`CGConfigureOption.forSession`).
 public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
   private let api: CoreGraphicsDisplayTransactionFunctions
-  /// The scope each transaction is completed with.
-  public let scope: DisplayConfigurationScope
 
-  /// Creates live hardware whose transactions complete with `scope`.
-  public init(scope: DisplayConfigurationScope = .session) {
+  /// Creates live hardware.
+  public init() {
     api = .live(bridge: PrivateAPIBridge())
-    self.scope = scope
   }
 
   /// Creates hardware that runs its transactions through `api`.
-  public init(
-    api: CoreGraphicsDisplayTransactionFunctions, scope: DisplayConfigurationScope = .session
-  ) {
+  public init(api: CoreGraphicsDisplayTransactionFunctions) {
     self.api = api
-    self.scope = scope
   }
 
   public func setEnabled(_ displayID: UInt32, enabled: Bool) throws {
@@ -494,7 +481,7 @@ public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
         )
       }
 
-      let completeError = api.complete(config, scope == .appOnly ? .forAppOnly : .forSession)
+      let completeError = api.complete(config, .forSession)
       guard completeError == .success else {
         throw nativeFailure(
           "CGCompleteDisplayConfiguration",

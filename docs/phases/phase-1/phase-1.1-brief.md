@@ -24,13 +24,11 @@ Goal: no disconnect done by `displayctl` can leave a display that only a reboot 
 | Offline ledger entry from an earlier boot | No mutation; reported; nonzero exit |
 | Enable call succeeds but the UUID is not active afterwards | Postcondition failure; entry kept |
 | Disconnect rollback fails, later `connect all` (new process) | Display re-enabled from the ledger |
-| `disconnect <sel> --trial <1..60>` | Same safety checks and ledger entry; disabled with app-only scope; process exits after at most the given time; `list` afterwards shows the display active (hardware) |
-| `disconnect <sel> --trial` out of range or without a value | Exit 64 |
 | `connect all` with offline ledger entries | Each ledger entry and each online inactive display attempted once; results reported per display; exit nonzero if any fails |
 | `connect all` with a stale entry (display unplugged) | Failure reported for that entry; other displays still reconnected |
 | `forget <uuid\|all>` (inferred) | Ledger entries removed without touching displays; for unplugged displays that would otherwise fail `connect all` forever |
 | `list` | Unchanged columns; ledger-only displays are not listed as online (inferred: a note on stderr names them) |
-| Hardware test, first disconnect | `--trial` of the internal display; the script verifies with `list` that it came back; session-scoped steps run only if it did |
+| Hardware test, first disconnect | Internal session-scoped disconnect with the watchdog armed (D-006) |
 | Hardware test, before each session-scoped disconnect | Detached watchdog armed; stays armed until the original active set is verified restored |
 | Hardware test, no confirmation within 20 s | Watchdog retries `connect all` until the original active set is back or a hard deadline passes; the script stops |
 | Hardware test, slow disconnect still holding the lock at 20 s | Watchdog keeps retrying and still restores the display |
@@ -49,7 +47,7 @@ At the `ConnectionController` boundary with the existing fake hardware, plus the
 6. Enable succeeds without the UUID becoming active → failure, entry kept.
 7. Ledger write failure → disconnect refused, no disable call made.
 8. Stale entry → reported failure, other displays still reconnected.
-9. `forget` and `--trial` parse; `--trial` uses the app-only scope.
+9. `forget` parses; `--trial` is rejected (D-006).
 Each must fail before the change. The watchdog is exercised with a stubbed `displayctl` (no input, late confirmation, slow lock holder); real recovery is verified on hardware.
 
 ## Scope
@@ -63,6 +61,6 @@ design.md §6.3.1, §7.3, §9.2 amended (D-003); platform note (D-002). implemen
 - [ ] acceptance tests fail before, pass after (report both)
 - [ ] full test suite passes; `swift format lint` clean
 - [ ] Codex review of `git diff c205693..HEAD` + triage
-- [ ] hardware test on macOS 27, recorded in README: internal `--trial` reverts; internal session disconnect/reconnect with watchdog; one unattended watchdog timeout restores a usable screen
+- [ ] hardware test on macOS 27, recorded in README: internal session disconnect/reconnect with watchdog; one unattended watchdog timeout restores a usable screen
 - [ ] external disconnect claimed supported only if recovery from a dropped display is observed; otherwise recorded as unsupported (D-004)
 - [ ] phase-1.1-complete.md written; phase-status.md updated

@@ -12,9 +12,6 @@ RESTORE_DEADLINE="${HARDWARE_TEST_RESTORE_DEADLINE:-90}"
 RETRY_INTERVAL="${HARDWARE_TEST_RETRY_INTERVAL:-2}"
 PROMPT_TIMEOUT="${HARDWARE_TEST_PROMPT_TIMEOUT:-60}"
 CMD_TIMEOUT="${HARDWARE_TEST_CMD_TIMEOUT:-60}"
-TRIAL_SECONDS="${HARDWARE_TEST_TRIAL_SECONDS:-10}"
-TRIAL_SETTLE="${HARDWARE_TEST_TRIAL_SETTLE:-5}"
-TRIAL_MARGIN="${HARDWARE_TEST_TRIAL_MARGIN:-10}"
 DISARM_SETTLE="${HARDWARE_TEST_DISARM_SETTLE:-5}"
 KILL_GRACE="${HARDWARE_TEST_KILL_GRACE:-3}"
 KILL_WAIT="${HARDWARE_TEST_KILL_WAIT:-2}"
@@ -24,8 +21,6 @@ export HARDWARE_TEST_CONFIRM_TIMEOUT="$CONFIRM_TIMEOUT" HARDWARE_TEST_ARMED_MAX=
   HARDWARE_TEST_KILL_GRACE="$KILL_GRACE" HARDWARE_TEST_KILL_WAIT="$KILL_WAIT"
 # Longest time stopping one process can take.
 ESCALATION=$(( KILL_GRACE + KILL_WAIT ))
-# When set, restore_loop touches this file before each `connect all`.
-INTERVENED_MARK=""
 
 log() {
   printf '%s %s\n' "$(date '+%H:%M:%S')" "$*"
@@ -130,7 +125,6 @@ restore_loop() {
       remaining=$(( end - $(now) - ESCALATION ))
       if (( remaining >= 1 )); then
         attempt=$(( attempt + 1 ))
-        if [[ -n "$INTERVENED_MARK" ]]; then : > "$INTERVENED_MARK"; fi
         rc=0
         output="$(run_bounded "$(min "$CMD_TIMEOUT" "$remaining")" "$DISPLAYCTL" connect all 2>&1)" || rc=$?
         log "connect all attempt $attempt exited $rc: $(printf '%s' "$output" | tr '\n' ' ')"
@@ -225,7 +219,6 @@ watchdog_main() {
   FG_PID="$2"
   FIRE_AFTER="$3"
   RUN_FIRED="$(dirname "$WD_STATE")/fired"
-  INTERVENED_MARK="$WD_STATE/intervened"
   WORKER=""
   REASON=""
   set +e
@@ -321,7 +314,6 @@ WD_DIR=""
 WD_PID=""
 REQ_SEQ=0
 OP_OUTPUT=""
-TRIAL_FAILURE=""
 UUID_PATTERN='^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$'
 
 print_recovery_help() {
@@ -538,40 +530,6 @@ choose_uuid() {
   REPLY="$ANSWER"
 }
 
-# App-only trial of one display. Sets TRIAL_FAILURE unless it came back by itself, unaided.
-run_trial() {
-  local label="$1" uuid="$2" rc=0 reverted=0 settle_end
-  TRIAL_FAILURE=""
-  echo ""
-  echo "Trial: the $label display goes dark for up to ${TRIAL_SECONDS}s and should return by itself."
-  confirm_exact "TRIAL DISCONNECT $label $uuid"
-  # The trial's watchdog waits for the trial, the settle time and a margin before it intervenes.
-  arm_watchdog $(( TRIAL_SECONDS + TRIAL_SETTLE + 2 * TRIAL_MARGIN ))
-  request_op $(( TRIAL_SECONDS + TRIAL_MARGIN )) disconnect "$uuid" --trial "$TRIAL_SECONDS" || rc=$?
-  if [[ -n "$OP_OUTPUT" ]]; then printf '%s\n' "$OP_OUTPUT"; fi
-  echo "Trial command exited $rc; checking with list --json that the display returned..."
-  settle_end=$(( $(now) + TRIAL_SETTLE ))
-  while [[ ! -e "$RUN_DIR/fired" ]]; do
-    if originals_active "$WD_DIR/originals" "$TRIAL_MARGIN"; then
-      reverted=1
-      break
-    fi
-    if (( $(now) >= settle_end )); then break; fi
-    sleep 1
-  done
-  # Restoration by the watchdog never counts: the check must see an unaided revert.
-  if [[ -e "$RUN_DIR/fired" || -e "$WD_DIR/intervened" ]]; then
-    TRIAL_FAILURE="the watchdog had to intervene"
-  elif [[ "$reverted" != 1 ]]; then
-    TRIAL_FAILURE="the display did not come back by itself within ${TRIAL_SETTLE}s"
-  elif [[ "$rc" != 0 ]]; then
-    TRIAL_FAILURE="the trial command exited $rc"
-  elif ! disarm_watchdog || [[ -e "$WD_DIR/intervened" ]]; then
-    TRIAL_FAILURE="the watchdog could not verify the displays at disarm"
-  fi
-  return 0
-}
-
 # Session-scoped disconnect and UUID reconnect of one display, both run by the watchdog.
 session_round_trip() {
   local label="$1" uuid="$2"
@@ -660,24 +618,15 @@ confirm_exact "SET HDMI BRIGHTNESS $BRIGHTNESS_PERCENT"
 run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" brightness set "$EXTERNAL_UUID" "$BRIGHTNESS_PERCENT"
 confirm_observed "The HDMI monitor changed physical brightness."
 
-# Step 1: internal app-only trial; macOS should revert it when displayctl exits.
-run_trial "INTERNAL" "$INTERNAL_UUID"
-if [[ -n "$TRIAL_FAILURE" ]]; then
-  echo "FAIL: internal trial: $TRIAL_FAILURE. App-only revert is not proven." >&2
-  echo "Session-scoped disconnects are skipped." >&2
-  exit 1
-fi
-echo "The internal display is active again after the trial, with no watchdog help."
-confirm_observed "The internal display went dark during the trial and came back by itself."
-
-# Step 2: internal session-scoped round trip.
+# Step 1: internal session-scoped round trip; withholding YES here is the unattended watchdog run.
 session_round_trip "INTERNAL" "$INTERNAL_UUID"
 echo ""
 echo "Internal display steps passed."
 
-# Step 3: external steps, only after the internal pass and a separate opt-in.
+# Step 2: external steps, only after the internal pass and a separate opt-in.
 echo ""
-echo "The external steps disable the HDMI display, which once needed a reboot to recover."
+echo "The external steps disable the HDMI display. Only the watchdog and the ledger bring it back."
+echo "If they fail, recover with connect all, then logout/login, then a reboot."
 echo "Type exactly the line below to run them; anything else skips them."
 echo "I OPT IN TO EXTERNAL DISPLAY DISCONNECT TESTS"
 if ! ask "$PROMPT_TIMEOUT" || [[ "$ANSWER" != "I OPT IN TO EXTERNAL DISPLAY DISCONNECT TESTS" ]]; then
@@ -685,20 +634,10 @@ if ! ask "$PROMPT_TIMEOUT" || [[ "$ANSWER" != "I OPT IN TO EXTERNAL DISPLAY DISC
   exit 0
 fi
 
-# Step 4: external app-only trial; session-scoped external steps need it to pass.
-run_trial "EXTERNAL" "$EXTERNAL_UUID"
-if [[ -n "$TRIAL_FAILURE" ]]; then
-  echo "External trial failed: $TRIAL_FAILURE."
-  echo "RESULT: external disconnect is unsupported on this macOS (D-004)."
-  echo "Skipped: the external session round trip and the final-display test. Internal results stand."
-  exit 0
-fi
-confirm_observed "The external display went dark during the trial and came back by itself."
-
-# Step 5: external session-scoped round trip.
+# Step 3: external session-scoped round trip.
 session_round_trip "EXTERNAL" "$EXTERNAL_UUID"
 
-# Step 6: final-display refusal; every setup disconnect has its own typed confirmation.
+# Step 4: final-display refusal; every setup disconnect has its own typed confirmation.
 echo ""
 echo "Final-display protection: every active display except the internal one is disconnected first."
 PREPARE_UUIDS="$(active_uuids "$CMD_TIMEOUT" | grep -Fvx -- "$INTERNAL_UUID" || true)"

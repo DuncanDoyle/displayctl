@@ -148,107 +148,35 @@ final class CLIParserTests: XCTestCase {
       XCTAssertEqual(result, CLIResult(stderr: "error: \(message)\n", exitCode: code))
     }
   }
-  // Acceptance test 9 (CLI part).
-  func testParsesTrialAndForgetAndRejectsBadTrialValues() async throws {
+  func testParsesForgetAndRejectsTrialAndBadForgetArguments() async throws {
     let valid: [([String], CLICommand)] = [
-      (["disconnect", "42", "--trial", "1"], .disconnectTrial(selector: "42", seconds: 1)),
-      (
-        ["disconnect", "internal", "--trial", "60"],
-        .disconnectTrial(selector: "internal", seconds: 60)
-      ),
       (["forget", "all"], .forgetAll),
       (["forget", uuid.uuidString.lowercased()], .forget(uuid: uuid)),
     ]
     for (arguments, command) in valid { XCTAssertEqual(try CLIParser.parse(arguments), command) }
     let invalid = [
-      ["disconnect", "42", "--trial"], ["disconnect", "42", "--trial", "0"],
-      ["disconnect", "42", "--trial", "61"], ["disconnect", "42", "--trial", "x"],
-      ["disconnect", "42", "--trial", "5", "extra"], ["disconnect", "--trial", "5"],
-      ["disconnect", "all", "--trial", "5"], ["forget"], ["forget", "42"],
-      ["forget", "all", "extra"],
+      ["disconnect", "42", "--trial", "5"], ["disconnect", "42", "--trial"], ["forget"],
+      ["forget", "42"], ["forget", "all", "extra"],
     ]
     for arguments in invalid {
       let result = await CLIApplication.run(arguments: arguments) { StubService() }
       XCTAssertEqual(result.exitCode, 64, "\(arguments)")
     }
-  }
-  func testTrialHoldRunsFromTheDisableCommit() async {
-    // The disable was committed 3 s before verification and output finished.
-    let committedAt = ContinuousClock.now - .seconds(3)
-    let service = StubService(displays: [display(active: false)], trialCommit: committedAt)
-    let result = await CLIApplication(service: service).execute(
-      .disconnectTrial(selector: "42", seconds: 5))
-    XCTAssertEqual(
-      result,
-      CLIResult(
-        stdout:
-          "disconnected uuid=\(uuid.uuidString) runtimeID=42 name=Desk Display active=false\n",
-        holdUntil: committedAt + .seconds(5)))
-    let calls = await service.calls
-    XCTAssertEqual(calls, ["trial:42:5"])
-    let help = await CLIApplication(service: service).execute(.help)
-    XCTAssertTrue(help.stdout.contains("displayctl disconnect <selector> [--trial <1...60>]"))
+    let help = await CLIApplication(service: StubService()).execute(.help)
+    XCTAssertFalse(help.stdout.contains("--trial"))
     XCTAssertTrue(help.stdout.contains("displayctl forget <uuid|all>"))
   }
-  // Acceptance test 9 (live wiring).
-  func testLiveTrialCompletesAppOnlyAndRecordsCommitBeforeVerification() async throws {
-    let screens = FakeScreens([
-      display(uuid: UUID(), id: 1), display(uuid: UUID(), id: 2), display(uuid: UUID(), id: 3),
-    ])
+  func testLiveDisconnectCompletesForTheSession() async throws {
+    let screens = FakeScreens([display(uuid: UUID(), id: 1), display(uuid: UUID(), id: 2)])
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("displayctl-tests-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let service = LiveCLIService(
-      inventory: screens, transaction: screens.transaction, stateDirectory: directory,
-      trialExpiry: TrialExpiry { _ in })
+      inventory: screens, transaction: screens.transaction, stateDirectory: directory)
 
-    let trial = try await service.disconnectTrial("1", seconds: 60)
-    XCTAssertEqual(screens.completeOptions, [.forAppOnly])
-    XCTAssertFalse(trial.display.isActive)
-    // The refresh that verifies the disable runs after the commit.
-    XCTAssertLessThanOrEqual(trial.committedAt, try XCTUnwrap(screens.lastSnapshotAt))
-
-    _ = try await service.disconnect("2")
-    XCTAssertEqual(screens.completeOptions, [.forAppOnly, .forSession])
-  }
-  func testTrialExpiryEndsTheProcessWhileTheRefreshIsBlocked() async throws {
-    let gate = DispatchSemaphore(value: 0)
-    let screens = FakeScreens(
-      [display(uuid: UUID(), id: 1), display(uuid: UUID(), id: 2)], blockAfterDisable: gate)
-    let directory = FileManager.default.temporaryDirectory
-      .appendingPathComponent("displayctl-tests-\(UUID().uuidString)", isDirectory: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let fired = expectation(description: "trial expiry fired")
-    let codes = ExitCodes()
-    let expiry = TrialExpiry { code in
-      codes.append(code)
-      fired.fulfill()
-    }
-    let service = LiveCLIService(
-      inventory: screens, transaction: screens.transaction, stateDirectory: directory,
-      trialExpiry: expiry)
-    let started = ContinuousClock.now
-
-    // The post-commit refresh blocks until the gate opens; the expiry must not wait for it.
-    let trial = Task { try await service.disconnectTrial("1", seconds: 1) }
-    await fulfillment(of: [fired], timeout: 5)
-    XCTAssertLessThan(ContinuousClock.now - started, .seconds(3))
-    XCTAssertEqual(codes.values, [TrialExpiry.unfinishedExitCode])
-    gate.signal()
-    _ = try await trial.value
-  }
-  func testTrialExpiryExitsWithTheFinishedResult() async {
-    let fired = expectation(description: "trial expiry fired")
-    let codes = ExitCodes()
-    let expiry = TrialExpiry { code in
-      codes.append(code)
-      fired.fulfill()
-    }
-    expiry.start(seconds: 1)
-    expiry.committed(at: .now)
-    expiry.finish(0)
-    await fulfillment(of: [fired], timeout: 5)
-    XCTAssertEqual(codes.values, [0])
+    let disconnected = try await service.disconnect("1")
+    XCTAssertFalse(disconnected.isActive)
+    XCTAssertEqual(screens.completeOptions, [.forSession])
   }
   func testForgetReportsRemovedEntries() async {
     let entry = DisabledDisplayEntry(
@@ -284,22 +212,9 @@ private final class FakeScreens: DisplaySnapshotProviding, @unchecked Sendable {
   private let lock = NSLock()
   private var displays: [Display]
   private var options: [CGConfigureOption] = []
-  private var snapshotAt: ContinuousClock.Instant?
-  private var disabled = false
-  private let blockAfterDisable: DispatchSemaphore?
-  init(_ displays: [Display], blockAfterDisable: DispatchSemaphore? = nil) {
-    self.displays = displays
-    self.blockAfterDisable = blockAfterDisable
-  }
+  init(_ displays: [Display]) { self.displays = displays }
   var completeOptions: [CGConfigureOption] { lock.withLock { options } }
-  var lastSnapshotAt: ContinuousClock.Instant? { lock.withLock { snapshotAt } }
-  func snapshot() throws -> [Display] {
-    if let blockAfterDisable, lock.withLock({ disabled }) { blockAfterDisable.wait() }
-    return lock.withLock {
-      snapshotAt = .now
-      return displays
-    }
-  }
+  func snapshot() throws -> [Display] { lock.withLock { displays } }
   var transaction: CoreGraphicsDisplayTransactionFunctions {
     CoreGraphicsDisplayTransactionFunctions(
       begin: { config in
@@ -308,7 +223,6 @@ private final class FakeScreens: DisplaySnapshotProviding, @unchecked Sendable {
       },
       enable: { _, id, enabled in
         self.lock.withLock {
-          if !enabled { self.disabled = true }
           self.displays = self.displays.map {
             guard $0.runtimeID == id else { return $0 }
             return Display(
@@ -330,22 +244,15 @@ private actor StubService: CLIService {
   let outcomes: [DisplayConnectionOutcome]
   let error: DisplayControlError?
   let entries: [DisabledDisplayEntry]
-  let trialCommit: ContinuousClock.Instant
   var calls: [String] = []
   init(
     displays: [Display] = [], outcomes: [DisplayConnectionOutcome] = [],
-    error: DisplayControlError? = nil, entries: [DisabledDisplayEntry] = [],
-    trialCommit: ContinuousClock.Instant = .now
+    error: DisplayControlError? = nil, entries: [DisabledDisplayEntry] = []
   ) {
     self.displays = displays
     self.outcomes = outcomes
     self.error = error
     self.entries = entries
-    self.trialCommit = trialCommit
-  }
-  func disconnectTrial(_ selector: String, seconds: Int) async throws -> TrialDisconnect {
-    calls.append("trial:\(selector):\(seconds)")
-    return TrialDisconnect(display: try checked(displays.last), committedAt: trialCommit)
   }
   func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry] {
     calls.append("forget:\(uuid?.uuidString ?? "all")")
@@ -375,11 +282,4 @@ private actor StubService: CLIService {
     guard let value else { throw DisplayControlError.configurationFailed("stub missing value") }
     return value
   }
-}
-/// Exit codes a test expiry was asked to end the process with.
-private final class ExitCodes: @unchecked Sendable {
-  private let lock = NSLock()
-  private var codes: [Int32] = []
-  func append(_ code: Int32) { lock.withLock { codes.append(code) } }
-  var values: [Int32] { lock.withLock { codes } }
 }

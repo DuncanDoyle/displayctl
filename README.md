@@ -46,7 +46,6 @@ displayctl list [--json]
 displayctl connect <selector>
 displayctl connect all
 displayctl disconnect <selector>
-displayctl disconnect <selector> --trial <1...60>
 displayctl forget <uuid|all>
 displayctl brightness get <selector>
 displayctl brightness set <selector> <0...100>
@@ -105,7 +104,7 @@ macOS can drop a soft-disabled display from its online display list. `connect` a
 - An entry is removed once its UUID is verified active again, or by `forget`.
 - `forget <uuid|all>` removes ledger entries without touching any display. Use it for a monitor that is unplugged for good, so `connect all` stops reporting it as a failure.
 
-`disconnect <selector> --trial <seconds>` is a test-only mode. It runs the same safety checks and ledger write, then disables the display with app-only scope instead of session scope. The process exits after at most the given number of seconds, and macOS is expected to undo the change at that moment, even on Ctrl-C or a crash. Check with `list` afterwards that the display is active again. The trial's ledger entry is cleared by the next `connect all`.
+On macOS 27 a disabled display disappears from `list`, and `disconnect` counts that as success (D-005). `list` then names it only in a note on standard error, read from the ledger.
 
 ### Recovery
 
@@ -142,30 +141,27 @@ Before each disconnect the script starts a detached watchdog. It runs in its own
 ### Test order
 
 1. Brightness get and set on the HDMI monitor.
-2. Internal `--trial`. It passes only if the display comes back by itself. If the watchdog has to step in, the trial fails. Session-scoped steps run only after a pass.
-3. Internal session-scoped disconnect, screen confirmation, then reconnect by UUID.
-4. Unattended run. This is a separate run of `Scripts/hardware-test.sh`, done after a run that passed steps 1 to 3. Repeat steps 1 and 2. At step 3, type the `DISCONNECT INTERNAL` line, then withhold the `YES` for the screen confirmation. The watchdog must fire within 20 seconds and restore a usable screen. Firing ends that run. Record the result, then start a fresh run for step 5.
-5. External opt-in, in a fresh run after steps 1 to 3 pass again. You type a separate sentence; anything else skips all external steps.
-6. External `--trial`. If the display does not come back by itself, the script reports external disconnect as unsupported on this macOS and skips steps 7 and 8.
-7. External session-scoped disconnect and reconnect by UUID.
-8. Final-display refusal: each other display is disconnected with its own confirmation, then the script checks that disconnecting the internal display is refused.
+2. Internal session-scoped disconnect, screen confirmation, then reconnect by UUID, with the watchdog armed.
+3. Unattended run. This is a separate run of `Scripts/hardware-test.sh`, done after a run that passed steps 1 and 2. Repeat step 1. At step 2, type the `DISCONNECT INTERNAL` line, then withhold the `YES` for the screen confirmation. The watchdog must fire within 20 seconds and restore a usable screen. Firing ends that run. Record the result, then start a fresh run for step 4.
+4. External opt-in, in a fresh run after steps 1 and 2 pass again. You type a separate sentence; anything else skips all external steps.
+5. External session-scoped disconnect and reconnect by UUID, with the watchdog armed. No OS safety net exists here (D-006). If the display does not come back, run `connect all`, then log out and in, then reboot.
+6. Final-display refusal: each other display is disconnected with its own confirmation, then the script checks that disconnecting the internal display is refused.
 
 USB-C recabling and logout/login stay manual.
 
 ### Results on macOS 27
 
-Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass. None of these has been run on macOS 27 yet.
+Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass. Only the item marked done has been observed on macOS 27.
 
 - [ ] Build completes on the target.
 - [ ] Automated tests pass on the target.
 - [ ] Interactive `list` shows internal and HDMI displays with stable UUIDs.
 - [ ] HDMI brightness get succeeds, or unsupported read-back is recorded.
 - [ ] HDMI brightness set is visually confirmed on the physical monitor.
-- [ ] Internal `--trial` reverts by itself.
+- [x] Watchdog restored the internal display from the ledger after it left the online list — observed 2026-11-23 (macOS 27.0.1).
 - [ ] Internal session disconnect and reconnect, with the watchdog armed.
 - [ ] One unattended watchdog timeout restores a usable screen.
-- [ ] External `--trial` reverts by itself, or external disconnect is recorded as unsupported.
-- [ ] External disconnect and reconnect. Claim support only if recovery of a display that macOS dropped from the online list was observed; otherwise record it as unsupported (D-004).
+- [ ] External disconnect and reconnect. Claim support only if recovery of a display that macOS dropped from the online list was observed; otherwise record it as unsupported (D-006).
 - [ ] Disconnecting the final active display is refused with a nonzero exit.
 - [ ] USB-C DDC is tested after recabling and the result is recorded.
 - [ ] Logout/login restores session-scoped connection state.

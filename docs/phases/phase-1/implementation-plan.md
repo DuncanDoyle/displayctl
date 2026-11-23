@@ -652,20 +652,18 @@ Expected: valid JSON. If `plutil` rejects JSON from stdin on the installed versi
 
 - [ ] **Step 4: Run the opt-in hardware matrix with the user present**
 
-Depends on sub-phase 1.1 (D-003, D-004). Order:
+Depends on sub-phase 1.1 (D-003, D-005, D-006). Order:
 
-1. Internal `--trial`; it must come back without watchdog help.
-2. Internal session-scoped disconnect/reconnect, with the watchdog armed.
-3. One unattended run: no confirmation, and the watchdog restores a usable screen.
-4. After a separate opt-in: external `--trial`. If it does not come back by itself, external disconnect is recorded as unsupported and steps 5–6 are skipped.
-5. External session-scoped disconnect/reconnect, with the watchdog armed.
-6. Final-display refusal, with one confirmation per setup disconnect.
+1. Internal session-scoped disconnect/reconnect, with the watchdog armed.
+2. One unattended run: no confirmation, and the watchdog restores a usable screen.
+3. After a separate opt-in: external session-scoped disconnect/reconnect, with the watchdog armed.
+4. Final-display refusal, with one confirmation per setup disconnect.
 
 External disconnect counts as supported on macOS 27 only if recovery from a dropped display is observed.
 
 Run: `Scripts/hardware-test.sh`
 
-Expected: HDMI hardware brightness changes physically. The internal display can be disconnected and reconnected while another remains active. The unattended run restores a usable screen. If the external trial reverts by itself, the external display round-trips the same way and final-display disconnect is refused. If it does not revert, external disconnect is recorded as unsupported, and the external round trip and the final-display test are skipped. `connect all` restores all physically present displays. Record USB-C as supported or unsupported in the hardware-validation section of `README.md` using the observed result.
+Expected: HDMI hardware brightness changes physically. The internal display can be disconnected and reconnected while another remains active. The unattended run restores a usable screen. The external display round-trips the same way, or its failure to come back is recorded with the recovery that worked. Final-display disconnect is refused. `connect all` restores all physically present displays. Record USB-C as supported or unsupported in the hardware-validation section of `README.md` using the observed result.
 
 - [ ] **Step 5: Check scope and commit stabilization changes**
 
