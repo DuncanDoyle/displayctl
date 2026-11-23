@@ -7,7 +7,7 @@ Updated: 2026-06-30
 - Main workspace: `<codex-checkout>`
 - Implementation worktree: `<codex-worktree>`
 - Branch: `feature/phase-1-cli`
-- Current HEAD: `8734343 fix: roll back failed display disconnects`
+- Current HEAD: `d4b4ce3 fix: roll back failed display disconnects`
 - Worktree was clean before this handoff update.
 
 ## Approved Scope
@@ -54,7 +54,7 @@ Observed results:
 
 Follow-up fix already committed:
 
-- `8734343 fix: roll back failed display disconnects`
+- `d4b4ce3 fix: roll back failed display disconnects`
 - Behavior: when a disconnect postcondition fails, the controller immediately attempts to re-enable the same pre-disconnect runtime display ID before returning `postconditionFailed`.
 - Regression test: `testDisconnectRollsBackWhenDisabledDisplayDisappearsFromInventory`.
 
@@ -66,7 +66,7 @@ Important safety note:
 
 ## Latest Verification Evidence
 
-After `8734343`:
+After `d4b4ce3`:
 
 - Targeted regression test failed before implementation and passed after implementation.
 - `swift test --filter ConnectionControllerTests --disable-sandbox`: 21 tests, 0 failures.

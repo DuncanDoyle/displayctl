@@ -6,7 +6,7 @@ Append-only. Newest at the bottom. Supersede, don't edit.
 **Context:** Phase 1 was designed and implemented by Codex in `<codex-checkout>`.
 **Decision:** The repo was cloned with full history into `<this checkout>` (remote `codex`). Claude authors new work; Codex reviews it. Docs moved to the agentic-engineering-sdlc layout under `docs/`.
 **Alternatives:** Working in the Codex checkout — rejected to keep the two agents' workspaces separate.
-**Consequences:** Phase 1 authorship is mixed: commits up to `c205693` are Codex-authored, later ones Claude-authored.
+**Consequences:** Phase 1 authorship is mixed: commits up to `c324c9c` are Codex-authored, later ones Claude-authored.
 
 ## D-002 — Target platform is now macOS 27 (2026-11-23, phase 1)
 **Context:** The design targets macOS Tahoe 26.5. The Mac now runs macOS 27.0.1 (26A434) with Swift 6.4.2. All private APIs used were only observed on 26.5.
@@ -40,3 +40,9 @@ Hardware testing does the internal display first (the main use case, with the De
 **Decision:** Remove `--trial` and the app-only scope; its safety promise is false on macOS 27. Supersedes D-004 (4) and design §6.3.2. Hardware test order: internal session round trip, unattended watchdog run, then the external display with the watchdog after a separate opt-in. User chose: "Drop trial, use watchdog".
 **Alternatives:** Internal-only support, recording external disconnect as unsupported (no reboot risk, loses a feature); keeping `--trial` for a future macOS (dead code with a false promise).
 **Consequences:** No OS-owned safety net exists. If the external display does not come back from the ledger, recovery is `connect all`, then logout/login, then reboot. External disconnect is recorded as supported only if its recovery from a dropped display is observed.
+
+## D-007 — Rewrite history before publishing (2026-11-23)
+**Context:** The repo was published to a public GitHub repository. Its history held local filesystem paths in review files, the Codex handoff and this log.
+**Decision:** Before the first push, `git filter-repo` replaced local paths with repo-root links, `~/` paths or placeholders (`<codex-checkout>`, `<codex-worktree>`, `<this checkout>`). Commit SHAs changed. SHAs cited in the docs, including inside reviewer text, were updated mechanically to the new ones; the review text is otherwise unchanged. `main` was fast-forwarded to the Phase 1 branch, and only `main` was pushed. User approved: "Make sure everything is clean before we push", "Keep gmail, push now".
+**Alternatives:** Squashing to one commit (loses the review trail); leaving the paths (exposes local layout).
+**Consequences:** SHAs in earlier chat logs or the original Codex checkout no longer match this repo.

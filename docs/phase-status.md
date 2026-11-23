@@ -3,13 +3,13 @@
 ## Phase
 Phase: 1 — CLI hardware validation
 Base: 699b839 (main before implementation)
-Author: mixed — openai (Codex) up to c205693; anthropic (claude-opus-5-5) from D-001 on
+Author: mixed — openai (Codex) up to c324c9c; anthropic (claude-opus-5-5) from D-001 on
 Advisory: none
 Docs: docs/phases/phase-1/
 Status: implementation done; hardware validation blocked on sub-phase 1.1
 
 ### Queue
-- [x] Q1 Plan tasks 1–9 — Codex, up to 8734343
+- [x] Q1 Plan tasks 1–9 — Codex, up to d4b4ce3
 - [ ] Q2 Task 10 verification and hardware matrix on macOS 27 — blocked on 1.1
 - [ ] Q3 (P1 correctness) HDMI disconnect needed a reboot to recover — src: codex-handoff-2026-06-30.md; addressed by 1.1, revalidated in Q2
 
@@ -24,7 +24,7 @@ Status: implementation done; hardware validation blocked on sub-phase 1.1
 ## Sub-phase
 Sub-phase: 1.1 — Recoverable disconnects
 Kind: planned (design amendment D-003)
-Base: c205693eb32e15191bbd3e7df0dbcd5407c939a8
+Base: c324c9cbc3dfdd79df6f16091c51938911255918
 Author: anthropic (claude-opus-5-5)
 Brief: docs/phases/phase-1/phase-1.1-brief.md
 
@@ -36,15 +36,15 @@ Design changes beyond D-003 to D-006 without a new decisions.md entry and user a
 
 ### Queue
 - [x] Codex review of the D-003 design amendment + brief — reviews/1.1-design-codex.md, 8 accepted, D-004
-- [x] Ledger, UUID-first connect, `forget`, `--trial`, with acceptance tests (TDD) — d6b1997
-- [x] Hardware-test watchdog and internal-first order — d6b1997
-- [x] Codex review of c205693..d6b1997 + triage — reviews/1.1-codex.md, 10 accepted (2 modified)
+- [x] Ledger, UUID-first connect, `forget`, `--trial`, with acceptance tests (TDD) — 1a2ec42
+- [x] Hardware-test watchdog and internal-first order — 1a2ec42
+- [x] Codex review of c324c9c..1a2ec42 + triage — reviews/1.1-codex.md, 10 accepted (2 modified)
 - [x] Fix round for reviews/1.1-codex.md
 - [x] Codex re-review of the fix round — reviews/1.1-fix-codex.md, 4 accepted, 1 rejected (user-confirmed)
 - [x] Fix round 2 for reviews/1.1-fix-codex.md
 - [x] Hardware test with the user on macOS 27 — runs 1–4, HDMI and USB-C; see Notes
 - [ ] Logout/login and a manual `connect all` — user will run later this week
-- [x] Final Codex review of c205693..a7c70e3 + triage — reviews/1.1-final-codex.md, 5 accepted, 1 rejected
+- [x] Final Codex review of c324c9c..61333d2 + triage — reviews/1.1-final-codex.md, 5 accepted, 1 rejected
 - [x] Fix round for reviews/1.1-final-codex.md — 159 tests pass (2026-11-23)
 
 ## Program

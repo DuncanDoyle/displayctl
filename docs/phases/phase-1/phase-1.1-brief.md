@@ -1,7 +1,7 @@
 # Sub-phase 1.1 — Recoverable disconnects
 
 Kind: planned (design amendment D-003)
-Base: c205693eb32e15191bbd3e7df0dbcd5407c939a8
+Base: c324c9cbc3dfdd79df6f16091c51938911255918
 Issues: none (repo has no GitHub remote) | Plan steps: Task 10 Step 4 blocked on this
 
 ## Problem / goal
@@ -52,7 +52,7 @@ Each must fail before the change. The watchdog is exercised with a stubbed `disp
 
 ## Scope
 In: `Sources/DisplayControlCore/ConnectionController.swift`, new ledger file in `DisplayControlCore`, `Sources/displayctl/main.swift`, matching tests, `Scripts/hardware-test.sh`, `README.md`.
-Out: Phase 2 agent, any `--force`. DDC changes were out of scope at start; the USB-C read/write fixes and the set fallback (`4ef76ab`, `c5444cf`, `21804a5`) are Task 10 hardware-verification fixes, recorded here so the sub-phase review covers them.
+Out: Phase 2 agent, any `--force`. DDC changes were out of scope at start; the USB-C read/write fixes and the set fallback (`7017236`, `9d3bb36`, `cb24ec8`) are Task 10 hardware-verification fixes, recorded here so the sub-phase review covers them.
 
 ## Plan / design impact
 design.md §6.3, §6.3.1, §6.3.2, §7.3, §9.2 amended (D-003 to D-006); platform note (D-002). implementation-plan.md: Task 10 Step 4 now depends on 1.1.
@@ -60,7 +60,7 @@ design.md §6.3, §6.3.1, §6.3.2, §7.3, §9.2 amended (D-003 to D-006); platfo
 ## Definition of done
 - [ ] acceptance tests fail before, pass after (report both)
 - [ ] full test suite passes; `swift format lint` clean
-- [ ] Codex review of `git diff c205693..HEAD` + triage
+- [ ] Codex review of `git diff c324c9c..HEAD` + triage
 - [ ] hardware test on macOS 27, recorded in README: internal session disconnect/reconnect with watchdog; one unattended watchdog timeout restores a usable screen
 - [ ] external disconnect claimed supported only if recovery from a dropped display is observed; otherwise recorded as unsupported (D-004)
 - [ ] phase-1.1-complete.md written; phase-status.md updated
