@@ -56,3 +56,4 @@ none
 - The Dell's UUID changed since June (`4E3207A4…` → `B3564974…`), likely a different cable/port. Check `list` before every hardware run.
 - Logout/login as a recovery path was never tried in June; worth trying before a reboot if a display wedges again.
 - 2026-11-23 hardware, macOS 27.0.1, Dell U2720Q on HDMI (UUID 4E3207A4…, runtime ID 5): run 1 found D-005 (disabled display leaves the online list; rollback re-enabled it by recorded ID 1). Run 2: DDC brightness get 30 / set 10 confirmed; internal disconnect verified; app-only trial did not revert (D-006); watchdog `connect all` restored the internal display from the ledger on attempt 1. Logs: ~/Library/Logs/displayctl-hardware-test/run.DqA4Jd, run.U8SMSk.
+- 2026-11-23 run 3 (run.qYsAha): full scripted matrix passed on HDMI — brightness, internal and external round trips (Dell left the online list; restored from the ledger), final-display refusal. Open: unattended run, USB-C, logout/login, manual connect all.
