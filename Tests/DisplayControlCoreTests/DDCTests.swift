@@ -528,6 +528,50 @@ final class DDCTests: XCTestCase {
     }
   }
 
+  func testNullVCPReplyThrowsDistinctRetryableError() {
+    XCTAssertThrowsError(try DDCPacket.parseVCPReply([0x6E, 0x80, 0xBE], expectedCode: 0x10)) {
+      XCTAssertEqual(
+        $0 as? DisplayControlError,
+        .ddcInvalidResponse("Monitor returned a DDC null message")
+      )
+    }
+  }
+
+  func testReadExchangeWritesRequestTwiceBeforeSingleRead() throws {
+    var events: [String] = []
+    let reply = validReply(current: 25, maximum: 100)
+    let exchange = DDCReadExchange(
+      write: { events.append("write \($0)") },
+      read: { length in
+        events.append("read \(length)")
+        return reply + [UInt8](repeating: 0, count: length - reply.count)
+      },
+      sleep: { events.append("sleep \($0)") }
+    )
+
+    XCTAssertEqual(try exchange.readVCP(code: 0x10), DDCValue(current: 25, maximum: 100))
+    let request = DDCPacket.readVCP(code: 0x10)
+    XCTAssertEqual(
+      events,
+      ["write \(request)", "sleep 10000", "write \(request)", "sleep 40000", "read 32"]
+    )
+  }
+
+  func testReadExchangeReportsNullMessageFromReadBuffer() {
+    let exchange = DDCReadExchange(
+      write: { _ in },
+      read: { [0x6E, 0x80, 0xBE] + [UInt8](repeating: 0, count: $0 - 3) },
+      sleep: { _ in }
+    )
+
+    XCTAssertThrowsError(try exchange.readVCP(code: 0x10)) {
+      XCTAssertEqual(
+        $0 as? DisplayControlError,
+        .ddcInvalidResponse("Monitor returned a DDC null message")
+      )
+    }
+  }
+
   func testSelectsUniqueHighestScoringExternalService() throws {
     let identity = displayIdentity()
     let weaker = service(id: 1, productName: "Other Display", serial: "SERIAL-1")

@@ -138,6 +138,10 @@ enum DDCPacket {
   }
 
   static func parseVCPReply(_ reply: [UInt8], expectedCode: UInt8) throws -> DDCValue {
+    // A zero-length reply (length byte 0x80) means the monitor had no answer ready.
+    if reply.count >= 2, reply[0] == displaySourceAddress, reply[1] == 0x80 {
+      throw invalidResponse("Monitor returned a DDC null message")
+    }
     guard reply.count >= 11 else {
       throw invalidResponse("VCP reply is too short")
     }
@@ -795,12 +799,39 @@ enum DDCIOReturnMapper {
   }
 }
 
+/// One VCP GET exchange over injected I2C write, read and sleep primitives.
+struct DDCReadExchange {
+  static let requestRepeatDelayMicroseconds: UInt32 = 10_000
+  static let replyDelayMicroseconds: UInt32 = 40_000
+  static let maximumReplyLength = 32
+
+  let write: ([UInt8]) throws -> Void
+  let read: (Int) throws -> [UInt8]
+  let sleep: (UInt32) -> Void
+
+  func readVCP(code: UInt8) throws -> DDCValue {
+    // Some monitors over USB-C answer a single GET with a null message; a repeated request gets a reply.
+    let request = DDCPacket.readVCP(code: code)
+    try write(request)
+    sleep(Self.requestRepeatDelayMicroseconds)
+    try write(request)
+    sleep(Self.replyDelayMicroseconds)
+
+    let reply = try read(Self.maximumReplyLength)
+    guard reply.count >= 2, reply[1] & 0x80 != 0 else {
+      throw DisplayControlError.ddcInvalidResponse("VCP reply length is not encoded")
+    }
+    let exactLength = Int(reply[1] & 0x7F) + 3
+    guard exactLength <= reply.count else {
+      throw DisplayControlError.ddcInvalidResponse("VCP reply length exceeds read buffer")
+    }
+    return try DDCPacket.parseVCPReply(Array(reply.prefix(exactLength)), expectedCode: code)
+  }
+}
+
 struct IOAVDDCTransport: DDCTransport {
   private static let chipAddress: UInt32 = 0x37
   private static let dataAddress: UInt32 = 0x51
-  private static let maximumReplyLength = 32
-  private static let protocolDelayMicroseconds: UInt32 = 40_000
-
   private let resolver: any DDCServiceResolving
   private let registry: IORegistryDDCServiceRegistry
   private let bridge: PrivateAPIBridge
@@ -816,33 +847,30 @@ struct IOAVDDCTransport: DDCTransport {
   }
 
   func readVCP(_ code: UInt8, for display: Display) throws -> DDCValue {
-    let request = DDCPacket.readVCP(code: code)
-    return try withService(for: display) { service in
+    try withService(for: display) { service in
       let write = try bridge.requireIOAVServiceWriteI2C()
-      try callWrite(write, service: service, bytes: request, display: display)
-      usleep(Self.protocolDelayMicroseconds)
-
       let read = try bridge.requireIOAVServiceReadI2C()
-      var reply = [UInt8](repeating: 0, count: Self.maximumReplyLength)
-      let result = reply.withUnsafeMutableBytes { buffer in
-        read(
-          service,
-          Self.chipAddress,
-          Self.dataAddress,
-          buffer.baseAddress,
-          UInt32(buffer.count)
-        )
-      }
-      try check(result, api: "IOAVServiceReadI2C", display: display)
-
-      guard reply[1] & 0x80 != 0 else {
-        throw DisplayControlError.ddcInvalidResponse("VCP reply length is not encoded")
-      }
-      let exactLength = Int(reply[1] & 0x7F) + 3
-      guard exactLength >= 3, exactLength <= reply.count else {
-        throw DisplayControlError.ddcInvalidResponse("VCP reply length exceeds read buffer")
-      }
-      return try DDCPacket.parseVCPReply(Array(reply.prefix(exactLength)), expectedCode: code)
+      let exchange = DDCReadExchange(
+        write: { bytes in
+          try callWrite(write, service: service, bytes: bytes, display: display)
+        },
+        read: { length in
+          var reply = [UInt8](repeating: 0, count: length)
+          let result = reply.withUnsafeMutableBytes { buffer in
+            read(
+              service,
+              Self.chipAddress,
+              Self.dataAddress,
+              buffer.baseAddress,
+              UInt32(buffer.count)
+            )
+          }
+          try check(result, api: "IOAVServiceReadI2C", display: display)
+          return reply
+        },
+        sleep: { delay in usleep(delay) }
+      )
+      return try exchange.readVCP(code: code)
     }
   }
 
