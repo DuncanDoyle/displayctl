@@ -17,7 +17,7 @@ Goal: no disconnect done by `displayctl` can leave a display that only a reboot 
 |---|---|
 | `disconnect <sel>` succeeds | Display recorded in the ledger before the disable; inactive afterwards |
 | `disconnect <sel>` and the ledger cannot be written | Exit nonzero, display untouched |
-| `disconnect <sel>` and macOS drops the display from the online list | Postcondition failure as today, but the display stays in the ledger and the existing rollback still runs |
+| `disconnect <sel>` and macOS drops the display from the online list | Verified disconnect (D-005); entry kept in the ledger, no rollback. A refresh that fails or is inconsistent still rolls back |
 | `connect <uuid>` for a ledger display that macOS no longer lists as online | Re-enable attempted with the recorded runtime ID; on verified active state the entry is removed, exit 0 |
 | `connect <uuid>` when the UUID is online under a new runtime ID | Enables the current ID, not the recorded one |
 | Offline ledger entry whose recorded ID is now held by another UUID | No mutation; skipped with a reported reason; nonzero exit |
@@ -52,10 +52,10 @@ Each must fail before the change. The watchdog is exercised with a stubbed `disp
 
 ## Scope
 In: `Sources/DisplayControlCore/ConnectionController.swift`, new ledger file in `DisplayControlCore`, `Sources/displayctl/main.swift`, matching tests, `Scripts/hardware-test.sh`, `README.md`.
-Out: DDC/brightness code, Phase 2 agent, any `--force`, retesting the external HDMI disconnect before internal passes.
+Out: Phase 2 agent, any `--force`. DDC changes were out of scope at start; the USB-C read/write fixes and the set fallback (`4ef76ab`, `c5444cf`, `21804a5`) are Task 10 hardware-verification fixes, recorded here so the sub-phase review covers them.
 
 ## Plan / design impact
-design.md §6.3.1, §7.3, §9.2 amended (D-003); platform note (D-002). implementation-plan.md: Task 10 Step 4 now depends on 1.1.
+design.md §6.3, §6.3.1, §6.3.2, §7.3, §9.2 amended (D-003 to D-006); platform note (D-002). implementation-plan.md: Task 10 Step 4 now depends on 1.1.
 
 ## Definition of done
 - [ ] acceptance tests fail before, pass after (report both)

@@ -19,21 +19,34 @@ struct DisplayMetadata: Sendable {
 
 public struct DisplayInventory: DisplaySnapshotProviding {
   private let candidateDetector: any DDCCandidateDetecting
+  private let sampleOnlineIDs: @Sendable () throws -> [UInt32]
+  private let sampleActiveIDs: @Sendable () throws -> [UInt32]
 
   public init() {
-    candidateDetector = ResolverDDCCandidateDetector(
-      resolver: IORegistryDDCServiceResolver()
-    )
+    self.init(
+      candidateDetector: ResolverDDCCandidateDetector(resolver: IORegistryDDCServiceResolver()))
   }
 
-  init(candidateDetector: any DDCCandidateDetecting) {
+  /// Tests inject the online and active ID samples; they default to Core Graphics.
+  init(
+    candidateDetector: any DDCCandidateDetecting,
+    onlineIDs: @escaping @Sendable () throws -> [UInt32] = { try onlineDisplayIDs() },
+    activeIDs: @escaping @Sendable () throws -> [UInt32] = { try activeDisplayIDs() }
+  ) {
     self.candidateDetector = candidateDetector
+    sampleOnlineIDs = onlineIDs
+    sampleActiveIDs = activeIDs
   }
 
   public func snapshot() throws -> [Display] {
-    let onlineIDs = try Self.onlineDisplayIDs()
-    let activeIDs = try Self.activeDisplayIDs()
+    let onlineIDs = try sampleOnlineIDs()
+    let activeIDs = try sampleActiveIDs()
     let activeIDSet = Set(activeIDs)
+    // An active ID missing from the online sample means the topology changed between the two calls.
+    guard activeIDSet.isSubset(of: onlineIDs) else {
+      throw DisplayControlError.configurationFailed(
+        "Display inventory changed while sampling; retry")
+    }
     let localizedNames = Self.localizedNames(for: activeIDSet)
 
     var metadata: [UInt32: DisplayMetadata] = [:]
@@ -138,14 +151,14 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     }
   }
 
-  private static func onlineDisplayIDs() throws -> [CGDirectDisplayID] {
+  static func onlineDisplayIDs() throws -> [CGDirectDisplayID] {
     try queryDisplayIDs(
       apiName: "CGGetOnlineDisplayList",
       listCall: CGGetOnlineDisplayList
     )
   }
 
-  private static func activeDisplayIDs() throws -> [CGDirectDisplayID] {
+  static func activeDisplayIDs() throws -> [CGDirectDisplayID] {
     try queryDisplayIDs(
       apiName: "CGGetActiveDisplayList",
       listCall: CGGetActiveDisplayList

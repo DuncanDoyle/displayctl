@@ -44,7 +44,8 @@ Design changes beyond D-003 without a new decisions.md entry and user approval; 
 - [x] Fix round 2 for reviews/1.1-fix-codex.md
 - [x] Hardware test with the user on macOS 27 — runs 1–4, HDMI and USB-C; see Notes
 - [ ] Logout/login and a manual `connect all` — user will run later this week
-- [ ] Final Codex review of c205693..HEAD with hardware results + triage ← CURRENT
+- [x] Final Codex review of c205693..a7c70e3 + triage — reviews/1.1-final-codex.md, 5 accepted, 1 rejected
+- [x] Fix round for reviews/1.1-final-codex.md — 159 tests pass (2026-11-23)
 
 ## Program
 none

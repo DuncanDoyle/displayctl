@@ -167,19 +167,19 @@ USB-C recabling and logout/login stay manual.
 
 ### Results on macOS 27
 
-Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass. Only the item marked done has been observed on macOS 27.
+Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass.
 
 - [x] Build completes on the target — observed 2026-11-23 (macOS 27.0.1).
-- [x] Automated tests pass on the target (146 tests) — observed 2026-11-23 (macOS 27.0.1).
+- [x] Automated tests pass on the target (final count in docs/phase-status.md) — observed 2026-11-23 (macOS 27.0.1).
 - [x] Interactive `list` shows internal and HDMI displays with stable UUIDs — observed 2026-11-23 (macOS 27.0.1).
 - [x] HDMI brightness get succeeds (read 10 and 30) — observed 2026-11-23 (macOS 27.0.1).
-- [x] HDMI brightness set is visually confirmed on the physical monitor — observed 2026-11-23 (macOS 27.0.1).
+- [x] HDMI brightness set is visually confirmed on the physical monitor — observed 2026-11-23 (macOS 27.0.1), before DDC requests were sent twice; HDMI is not yet rechecked with the doubled sends.
 - [x] Watchdog restored the internal display from the ledger after it left the online list — observed 2026-11-23 (macOS 27.0.1).
 - [x] Internal session disconnect and reconnect, with the watchdog armed — observed 2026-11-23 (macOS 27.0.1).
-- [ ] One unattended watchdog timeout restores a usable screen.
+- [x] A watchdog timeout restored a usable screen: in run 4 (USB-C) the final YES was withheld, and the watchdog restored the Dell from the ledger 20 s later — observed 2026-11-23 (macOS 27.0.1). It ran at the end of the external steps, not as a separate run before them.
 - [x] External disconnect and reconnect over HDMI: the Dell left the online list and `connect <uuid>` restored it from the ledger — observed 2026-11-23 (macOS 27.0.1). Claim support only if recovery of a display that macOS dropped from the online list was observed; otherwise record it as unsupported (D-006).
 - [x] Disconnecting the final active display is refused with a nonzero exit — observed 2026-11-23 (macOS 27.0.1).
-- [ ] USB-C DDC is tested after recabling and the result is recorded.
+- [x] USB-C: brightness get and set work once DDC requests are sent twice; disconnect and reconnect of the Dell work — observed 2026-11-23 (macOS 27.0.1).
 - [ ] Logout/login restores session-scoped connection state.
 - [ ] Manual `displayctl connect all` restores available displays.
 

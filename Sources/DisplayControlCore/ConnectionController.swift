@@ -167,24 +167,20 @@ public struct ConnectionController: Sendable {
   }
 
   /// Enables an online inactive display, or a ledger display that macOS no longer lists when the
-  /// selector is its UUID.
+  /// selector is its UUID or a kind with exactly one candidate.
   public func connect(_ selector: String) throws -> Display {
     try operationLock.withLock {
       let displays = try snapshot.snapshot()
+      if let kind = DisplayKind(rawValue: selector) {
+        return try connect(kind, selector: selector, in: displays)
+      }
       let display: Display
       do {
         display = try DisplaySelector.resolve(selector, in: displays)
       } catch DisplayControlError.displayNotFound(let missing) {
-        // A display that left the online list is reachable by UUID or by a unique kind.
-        let entries = try ledger.load()
-        let matches: [DisabledDisplayEntry]
-        if let kind = DisplayKind(rawValue: selector) {
-          matches = entries.filter { $0.kind == kind }
-        } else if let uuid = UUID(uuidString: selector) {
-          matches = entries.filter { $0.uuid == uuid }
-        } else {
-          matches = []
-        }
+        // A display that left the online list is reachable by its UUID through the ledger.
+        let uuid = UUID(uuidString: selector)
+        let matches = uuid == nil ? [] : try ledger.load().filter { $0.uuid == uuid }
         guard let entry = matches.first else {
           throw DisplayControlError.displayNotFound(missing)
         }
@@ -199,6 +195,43 @@ public struct ConnectionController: Sendable {
       let result = try transition(display, enabled: true)
       removeEntry(display.uuid)
       return result
+    }
+  }
+
+  /// Resolves a kind across online inactive displays and ledger entries that are not online, and
+  /// enables the single candidate; zero or several candidates fail before any mutation.
+  private func connect(_ kind: DisplayKind, selector: String, in displays: [Display]) throws
+    -> Display
+  {
+    let online = displays.filter { $0.kind == kind }
+    let onlineUUIDs = Set(online.map(\.uuid))
+    let inactive = online.filter { !$0.isActive }
+    var ledgerOnly: [DisabledDisplayEntry] = []
+    for entry in try ledger.load()
+    where entry.kind == kind && !onlineUUIDs.contains(entry.uuid)
+      && !ledgerOnly.contains(where: { $0.uuid == entry.uuid })
+    {
+      ledgerOnly.append(entry)
+    }
+
+    switch (inactive.count + ledgerOnly.count, inactive.first, ledgerOnly.first) {
+    case (1, let display?, _):
+      let result = try transition(display, enabled: true)
+      removeEntry(display.uuid)
+      return result
+    case (1, _, let entry?):
+      return try reconnect(entry.uuid, entry: entry, acceptAlreadyActive: false)
+    case (0, _, _):
+      let active = online.filter(\.isActive)
+      guard let display = active.first else {
+        throw DisplayControlError.displayNotFound(selector)
+      }
+      guard active.count == 1 else {
+        throw DisplayControlError.ambiguousSelector(selector)
+      }
+      throw DisplayControlError.invalidState("Display \(display.runtimeID) is already active")
+    default:
+      throw DisplayControlError.ambiguousSelector(selector)
     }
   }
 

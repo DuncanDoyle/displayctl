@@ -352,6 +352,17 @@ final class DisplayInventoryTests: XCTestCase {
     XCTAssertTrue(result.allSatisfy { $0.ddcCapability == .unknown })
   }
 
+  func testActiveIDMissingFromOnlineSampleFailsAsInconsistent() {
+    let inventory = DisplayInventory(
+      candidateDetector: UnknownDDCCandidateDetector(), onlineIDs: { [] }, activeIDs: { [1] })
+
+    XCTAssertThrowsError(try inventory.snapshot()) {
+      XCTAssertEqual(
+        $0 as? DisplayControlError,
+        .configurationFailed("Display inventory changed while sampling; retry"))
+    }
+  }
+
   private func metadata(
     localizedNames: [UInt32: String] = [1: "Internal Panel", 2: "Studio Display"]
   )
@@ -378,4 +389,8 @@ final class DisplayInventoryTests: XCTestCase {
       ),
     ]
   }
+}
+
+struct UnknownDDCCandidateDetector: DDCCandidateDetecting {
+  func capability(for display: Display) -> DDCCapability { .unknown }
 }

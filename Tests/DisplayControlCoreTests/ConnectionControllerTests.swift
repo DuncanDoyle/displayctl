@@ -243,6 +243,27 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(ledger.entries, [])
   }
 
+  func testDisableFollowedByInconsistentInventoryRefreshIsNotSuccess() {
+    let target = fixture(1, active: true)
+    let other = fixture(2, active: true)
+    let hardware = FakeDisplayStore([target, other])
+    hardware.appliesChanges = false
+    // The refresh's online sample omits the target while its active sample still holds it.
+    let refresh = DisplayInventory(
+      candidateDetector: UnknownDDCCandidateDetector(), onlineIDs: { [] }, activeIDs: { [1] })
+    let snapshot = ScriptedSnapshot { call in
+      call == 2 ? try refresh.snapshot() : [target, other]
+    }
+    let controller = ConnectionController(
+      snapshot: snapshot, hardware: hardware, lock: FakeOperationLock(), ledger: FakeLedger(),
+      bootSession: { currentBoot }, runtimeIDOwner: { _ in nil })
+
+    XCTAssertThrowsError(try controller.disconnect("1")) {
+      assertPostcondition($0, contains: ["changed while sampling", "rollback not needed"])
+    }
+    XCTAssertEqual(hardware.requests, [.init(id: 1, enabled: false)])
+  }
+
   func testDisconnectRecordsLedgerEntryBeforeDisabling() throws {
     let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: true)])
     let ledger = FakeLedger()
@@ -362,6 +383,36 @@ final class ConnectionControllerTests: XCTestCase {
 
     XCTAssertEqual(display.uuid, builtIn.uuid)
     XCTAssertTrue(display.isActive)
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  func testConnectKindSelectorIsAmbiguousAcrossOnlineAndLedgerCandidates() {
+    let builtIn = fixture(1, active: true)
+    let onlineDark = fixture(2, active: false, kind: .external)
+    let ledgerOnly = fixture(3, active: true, kind: .external)
+    let store = FakeDisplayStore([builtIn, onlineDark])
+    let ledger = FakeLedger([entry(for: ledgerOnly)])
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).connect("external")) {
+      XCTAssertEqual($0 as? DisplayControlError, .ambiguousSelector("external"))
+    }
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: ledgerOnly)])
+  }
+
+  func testConnectKindSelectorSkipsActiveOnlineDisplayForLedgerCandidate() throws {
+    let builtIn = fixture(1, active: true)
+    let onlineActive = fixture(2, active: true, kind: .external)
+    let ledgerOnly = fixture(3, active: true, kind: .external)
+    let store = FakeDisplayStore([builtIn, onlineActive])
+    let ledger = FakeLedger([entry(for: ledgerOnly)])
+    store.reactions = [.init(id: 3, enabled: true): [builtIn, onlineActive, ledgerOnly]]
+
+    let display = try makeController(store, ledger: ledger).connect("external")
+
+    XCTAssertEqual(display.uuid, ledgerOnly.uuid)
+    XCTAssertTrue(display.isActive)
+    XCTAssertEqual(store.requests, [.init(id: 3, enabled: true)])
     XCTAssertEqual(ledger.entries, [])
   }
 
@@ -735,6 +786,21 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
     if removeAfterMutation {
       displays.remove(at: index)
     }
+  }
+}
+
+/// Answers each snapshot call (1-based) from `respond`.
+private final class ScriptedSnapshot: DisplaySnapshotProviding, @unchecked Sendable {
+  private var calls = 0
+  private let respond: (Int) throws -> [Display]
+
+  init(_ respond: @escaping (Int) throws -> [Display]) {
+    self.respond = respond
+  }
+
+  func snapshot() throws -> [Display] {
+    calls += 1
+    return try respond(calls)
   }
 }
 

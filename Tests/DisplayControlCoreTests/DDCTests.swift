@@ -575,6 +575,54 @@ final class DDCTests: XCTestCase {
     XCTAssertEqual(events, ["write \(packet)", "sleep 10000", "write \(packet)"])
   }
 
+  func testSetSucceedsWhenRepeatedWriteFails() throws {
+    var writes = 0
+    let exchange = DDCExchange(
+      write: { _ in
+        writes += 1
+        if writes == 2 { throw DisplayControlError.ddcTimeout }
+      },
+      read: { _ in [] },
+      sleep: { _ in }
+    )
+
+    try exchange.writeVCP(code: 0x10, value: 50)
+    XCTAssertEqual(writes, 2)
+  }
+
+  func testReadStillReadsWhenRepeatedRequestFails() throws {
+    var writes = 0
+    let reply = validReply(current: 25, maximum: 100)
+    let exchange = DDCExchange(
+      write: { _ in
+        writes += 1
+        if writes == 2 { throw DisplayControlError.ddcTimeout }
+      },
+      read: { reply + [UInt8](repeating: 0, count: $0 - reply.count) },
+      sleep: { _ in }
+    )
+
+    XCTAssertEqual(try exchange.readVCP(code: 0x10), DDCValue(current: 25, maximum: 100))
+  }
+
+  func testFirstWriteFailurePropagatesForSetAndRead() {
+    let exchange = DDCExchange(
+      write: { _ in throw DisplayControlError.ddcTimeout },
+      read: { _ in
+        XCTFail("a failed request must not read")
+        return []
+      },
+      sleep: { _ in }
+    )
+
+    XCTAssertThrowsError(try exchange.writeVCP(code: 0x10, value: 50)) {
+      XCTAssertEqual($0 as? DisplayControlError, .ddcTimeout)
+    }
+    XCTAssertThrowsError(try exchange.readVCP(code: 0x10)) {
+      XCTAssertEqual($0 as? DisplayControlError, .ddcTimeout)
+    }
+  }
+
   func testReadExchangeReportsNullMessageFromReadBuffer() {
     let exchange = DDCExchange(
       write: { _ in },
