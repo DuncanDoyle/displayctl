@@ -146,10 +146,16 @@ The operation lock uses Darwin `flock` on a lock file in the logged-in user's te
 
 macOS can drop a soft-disabled display from the online display list, so the inventory alone cannot always find it again. The controller therefore keeps a per-user ledger file of displays that `displayctl` disabled:
 
-- A disconnect records the display's UUID, runtime ID and name in the ledger before invoking `CGSConfigureDisplayEnabled`, under the operation lock. If recording fails, the disconnect does not happen.
-- A connect resolves its selector against the inventory and the ledger. A ledger entry that macOS no longer lists as online is still a valid target: the controller re-enables its recorded runtime ID.
-- An entry is removed only once the display is verified active again, or when the user removes it explicitly because the display was physically unplugged.
-- The ledger survives process exit. Entries left over from a previous login session or boot are still tried by `connect all`; a failure on a stale entry is reported, not fatal.
+- The ledger and the operation lock live in `~/Library/Application Support/displayctl/`, independent of the working directory and `$TMPDIR`, so the CLI, the hardware-test watchdog and the Phase 2 agent share them.
+- A disconnect records the display's UUID, runtime ID, name and the current boot time in the ledger, atomically and under the operation lock, before invoking `CGSConfigureDisplayEnabled`. If recording fails, the disconnect does not happen.
+- A connect resolves its selector against the inventory and the ledger, by UUID first (D-004). If the UUID is online, its current runtime ID is used. An offline entry is enabled by its recorded runtime ID only when the entry is from the current boot and no online display of another UUID holds that ID. Otherwise the entry is reported and skipped. The disconnect rollback follows the same rule.
+- An entry is removed only once its UUID is verified active again, or when the user runs `displayctl forget`. Entries whose state is uncertain are kept.
+- Entries from an earlier boot are kept for reporting but never trigger a mutation.
+- Identity checks and per-display outcomes stay in `DisplayControlCore`; the CLI only maps them to exit codes, so Phase 2 can reuse them under the lock.
+
+#### 6.3.2 Trial disconnect (D-004)
+
+`displayctl disconnect <selector> --trial <seconds>` is a test-only mode. It runs the same safety checks, records the ledger entry, and disables the display in a transaction completed with the app-only configuration scope instead of the session scope. It then waits at most the given number of seconds (1–60) and exits. macOS is expected to undo app-only changes when the process exits, including on Ctrl-C or a crash. The process cannot observe its own exit, so the caller checks with `list` afterwards that the display is active again. A trial that reverts clears its ledger entry on the next `connect all`. It is the first hardware check on a new macOS version.
 
 There is no force option for disconnecting the final active display. `connect all` is idempotent: a candidate that becomes active before its turn is treated as a successful recovery. Every `connect all` outcome carries the original candidate display identity alongside its typed success or failure so callers can report results independently.
 
@@ -279,7 +285,9 @@ The M5/Tahoe 26.5 validation matrix includes:
 7. Run the DDC checks over USB-C and record supported or unsupported status.
 8. Verify logout/login recovery for session-scoped display configuration.
 
-Before each disconnect, the hardware test arms a watchdog that runs `displayctl connect all` after a short timeout (default 20 s) unless the user confirms in time that they can see and use a display. The watchdog runs detached from the test's foreground flow, so it fires even when the user cannot type. The internal display is tested before the external one (D-003).
+The hardware test runs a `--trial` disconnect of the internal display first (§6.3.2). Session-scoped disconnects follow only if the trial reverted.
+
+Before each session-scoped disconnect, the hardware test arms a watchdog that runs detached from the test's foreground flow, so it fires even when the user cannot type. It stays armed until the test has restored and verified the original set of active displays. If the user has not confirmed within the timeout (default 20 s), it retries `displayctl connect all` until that set is active again or a hard deadline passes, and the test stops; another disconnect needs a fresh opt-in. The internal display is tested before the external one, and every external disable, including test setup, needs the internal pass and an explicit opt-in (D-003, D-004).
 
 Tests must restore the initial display state when possible. Failures must print manual recovery instructions, including `displayctl connect all` and logout/login.
 

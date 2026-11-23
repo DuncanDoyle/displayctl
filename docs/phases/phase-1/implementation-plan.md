@@ -652,6 +652,8 @@ Expected: valid JSON. If `plutil` rejects JSON from stdin on the installed versi
 
 - [ ] **Step 4: Run the opt-in hardware matrix with the user present**
 
+Depends on sub-phase 1.1 (D-003, D-004): run the internal `--trial` first, then internal session-scoped steps with the watchdog, then external steps only after a separate opt-in.
+
 Run: `Scripts/hardware-test.sh`
 
 Expected: HDMI hardware brightness changes physically; both displays can be disconnected and reconnected only while another remains active; final-display disconnect is refused; `connect all` restores all physically present displays. Record USB-C as supported or unsupported in the hardware-validation section of `README.md` using the observed result.

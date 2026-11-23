@@ -35,8 +35,8 @@ Ledger, `connect` changes, `forget`, hardware-test watchdog, tests and docs, per
 Design changes beyond D-003 without a new decisions.md entry and user approval; DDC changes; Phase 2 work.
 
 ### Queue
-- [ ] Codex review of the D-003 design amendment + brief ← CURRENT
-- [ ] Ledger + connect/connect all/forget, with acceptance tests (TDD)
+- [x] Codex review of the D-003 design amendment + brief — reviews/1.1-design-codex.md, 8 accepted, D-004
+- [ ] Ledger, UUID-first connect, `forget`, `--trial`, with acceptance tests (TDD) ← CURRENT
 - [ ] Hardware-test watchdog and internal-first order
 - [ ] Codex review of c205693..HEAD + triage
 - [ ] Hardware test with the user: internal disconnect/reconnect on macOS 27

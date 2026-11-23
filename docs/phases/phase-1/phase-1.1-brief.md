@@ -19,25 +19,38 @@ Goal: no disconnect done by `displayctl` can leave a display that only a reboot 
 | `disconnect <sel>` and the ledger cannot be written | Exit nonzero, display untouched |
 | `disconnect <sel>` and macOS drops the display from the online list | Postcondition failure as today, but the display stays in the ledger and the existing rollback still runs |
 | `connect <uuid>` for a ledger display that macOS no longer lists as online | Re-enable attempted with the recorded runtime ID; on verified active state the entry is removed, exit 0 |
+| `connect <uuid>` when the UUID is online under a new runtime ID | Enables the current ID, not the recorded one |
+| Offline ledger entry whose recorded ID is now held by another UUID | No mutation; skipped with a reported reason; nonzero exit |
+| Offline ledger entry from an earlier boot | No mutation; reported; nonzero exit |
+| Enable call succeeds but the UUID is not active afterwards | Postcondition failure; entry kept |
+| Disconnect rollback fails, later `connect all` (new process) | Display re-enabled from the ledger |
+| `disconnect <sel> --trial <1..60>` | Same safety checks and ledger entry; disabled with app-only scope; process exits after at most the given time; `list` afterwards shows the display active (hardware) |
+| `disconnect <sel> --trial` out of range or without a value | Exit 64 |
 | `connect all` with offline ledger entries | Each ledger entry and each online inactive display attempted once; results reported per display; exit nonzero if any fails |
 | `connect all` with a stale entry (display unplugged) | Failure reported for that entry; other displays still reconnected |
 | `forget <uuid\|all>` (inferred) | Ledger entries removed without touching displays; for unplugged displays that would otherwise fail `connect all` forever |
 | `list` | Unchanged columns; ledger-only displays are not listed as online (inferred: a note on stderr names them) |
-| Hardware test, before each disconnect | Watchdog armed; it runs `connect all` after 20 s unless the user types the confirmation first |
-| Hardware test, user confirms in time | Watchdog cancelled; test continues |
-| Hardware test order | Internal disconnect/reconnect first; external only after internal passes and the user opts in |
+| Hardware test, first disconnect | `--trial` of the internal display; the script verifies with `list` that it came back; session-scoped steps run only if it did |
+| Hardware test, before each session-scoped disconnect | Detached watchdog armed; stays armed until the original active set is verified restored |
+| Hardware test, no confirmation within 20 s | Watchdog retries `connect all` until the original active set is back or a hard deadline passes; the script stops |
+| Hardware test, slow disconnect still holding the lock at 20 s | Watchdog keeps retrying and still restores the display |
+| Hardware test order | Internal first; every external disable, including the final-display refusal setup, needs the internal pass and a separate opt-in |
 
 ## Root cause (if known)
 `connect all` and `connect <sel>` resolve targets only from `CGGetOnlineDisplayList` (`DisplayInventory.swift:34`, `:135`). Once macOS drops a disabled display from that list, the tool has no record of its runtime ID, so nothing can call `CGSConfigureDisplayEnabled(id, true)` for it. Whether macOS 27 honours that call for a dropped display is unverified; the hardware test answers it.
 
 ## Acceptance tests
-At the `ConnectionController` boundary with the existing fake hardware, plus the CLI parser:
-1. Disconnect where the fake drops the display from the online list → a later `connect all` (new controller instance, same ledger file) re-enables the recorded runtime ID.
+At the `ConnectionController` boundary with the existing fake hardware, plus the CLI parser. The fake must not restore a display just because its old ID is called; each test sets up what macOS does.
+1. Disconnect drops the display, the immediate rollback fails; a later `connect all` (new controller, same ledger file) restores that UUID.
 2. `connect <uuid>` for a ledger-only display succeeds and empties the entry.
-3. Ledger write failure → disconnect refused, no enable call made.
-4. Stale entry → reported failure, other displays still reconnected.
-5. `forget` parses and empties the ledger.
-Each must fail before the change. The watchdog is verified on hardware (the script is not unit tested).
+3. Same UUID online under a new runtime ID → the new ID is enabled.
+4. Recorded ID now held by another UUID → no mutation, reported.
+5. Entry from an earlier boot → no mutation, reported.
+6. Enable succeeds without the UUID becoming active → failure, entry kept.
+7. Ledger write failure → disconnect refused, no disable call made.
+8. Stale entry → reported failure, other displays still reconnected.
+9. `forget` and `--trial` parse; `--trial` uses the app-only scope.
+Each must fail before the change. The watchdog is exercised with a stubbed `displayctl` (no input, late confirmation, slow lock holder); real recovery is verified on hardware.
 
 ## Scope
 In: `Sources/DisplayControlCore/ConnectionController.swift`, new ledger file in `DisplayControlCore`, `Sources/displayctl/main.swift`, matching tests, `Scripts/hardware-test.sh`, `README.md`.
@@ -50,5 +63,6 @@ design.md §6.3.1, §7.3, §9.2 amended (D-003); platform note (D-002). implemen
 - [ ] acceptance tests fail before, pass after (report both)
 - [ ] full test suite passes; `swift format lint` clean
 - [ ] Codex review of `git diff c205693..HEAD` + triage
-- [ ] hardware test: internal disconnect/reconnect with watchdog on macOS 27, result recorded in README
+- [ ] hardware test on macOS 27, recorded in README: internal `--trial` reverts; internal session disconnect/reconnect with watchdog; one unattended watchdog timeout restores a usable screen
+- [ ] external disconnect claimed supported only if recovery from a dropped display is observed; otherwise recorded as unsupported (D-004)
 - [ ] phase-1.1-complete.md written; phase-status.md updated
