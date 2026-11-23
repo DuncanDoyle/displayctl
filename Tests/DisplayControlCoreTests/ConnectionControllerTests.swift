@@ -350,6 +350,21 @@ final class ConnectionControllerTests: XCTestCase {
   }
 
   // Acceptance test 2.
+  // The everyday flow: `disconnect internal`, then `connect internal` once it left the list.
+  func testConnectKindSelectorFindsTheOnlyLedgerDisplayOfThatKind() throws {
+    let builtIn = fixture(1, active: true, kind: .internal)
+    let dell = fixture(2, active: true, kind: .external)
+    let store = FakeDisplayStore([dell])
+    let ledger = FakeLedger([entry(for: builtIn)])
+    store.reactions = [.init(id: 1, enabled: true): [builtIn, dell]]
+
+    let display = try makeController(store, ledger: ledger).connect("internal")
+
+    XCTAssertEqual(display.uuid, builtIn.uuid)
+    XCTAssertTrue(display.isActive)
+    XCTAssertEqual(ledger.entries, [])
+  }
+
   func testConnectUUIDForLedgerOnlyDisplayEnablesRecordedIDAndClearsEntry() throws {
     let external = fixture(1, active: true, kind: .external)
     let other = fixture(2, active: true)

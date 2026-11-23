@@ -175,12 +175,23 @@ public struct ConnectionController: Sendable {
       do {
         display = try DisplaySelector.resolve(selector, in: displays)
       } catch DisplayControlError.displayNotFound(let missing) {
-        guard let uuid = UUID(uuidString: selector),
-          let entry = try ledger.load().first(where: { $0.uuid == uuid })
-        else {
+        // A display that left the online list is reachable by UUID or by a unique kind.
+        let entries = try ledger.load()
+        let matches: [DisabledDisplayEntry]
+        if let kind = DisplayKind(rawValue: selector) {
+          matches = entries.filter { $0.kind == kind }
+        } else if let uuid = UUID(uuidString: selector) {
+          matches = entries.filter { $0.uuid == uuid }
+        } else {
+          matches = []
+        }
+        guard let entry = matches.first else {
           throw DisplayControlError.displayNotFound(missing)
         }
-        return try reconnect(uuid, entry: entry, acceptAlreadyActive: false)
+        guard matches.count == 1 else {
+          throw DisplayControlError.ambiguousSelector(selector)
+        }
+        return try reconnect(entry.uuid, entry: entry, acceptAlreadyActive: false)
       }
       guard !display.isActive else {
         throw DisplayControlError.invalidState("Display \(display.runtimeID) is already active")
