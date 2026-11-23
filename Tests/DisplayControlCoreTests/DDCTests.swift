@@ -104,6 +104,21 @@ final class DDCTests: XCTestCase {
     XCTAssertEqual(transport.operations.last, .write(0x10, 42, externalDisplay()))
   }
 
+  // Design §6.5: a set still writes when read-back fails, as over USB-C on a Dell U2720Q.
+  func testControllerUsesMaximum100WhenReadBackKeepsFailing() async throws {
+    let readFailures: [DisplayControlError] = [
+      .ddcInvalidResponse("VCP reply is too short"), .ddcTimeout, .ddcTransport("read failed"),
+    ]
+    for error in readFailures {
+      let transport = FakeDDCTransport(readResults: Array(repeating: .failure(error), count: 3))
+      let controller = makeController(transport: transport)
+
+      try await controller.set(percent: 42, display: externalDisplay())
+
+      XCTAssertEqual(transport.operations.last, .write(0x10, 42, externalDisplay()))
+    }
+  }
+
   func testControllerDoesNotUseMaximumFallbackForOtherReadFailures() async {
     let expected = DisplayControlError.ddcServiceNotFound
     let transport = FakeDDCTransport(readResults: [.failure(expected)])

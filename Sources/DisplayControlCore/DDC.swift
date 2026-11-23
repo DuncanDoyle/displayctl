@@ -72,7 +72,8 @@ public actor DDCBrightnessController {
       maximum = try retrying {
         try transport.readVCP(Self.brightnessCode, for: display).maximum
       }
-    } catch DisplayControlError.ddcUnsupported {
+    } catch let error as DisplayControlError where error == .ddcUnsupported || isRetryable(error) {
+      // Read-back may fail on monitors that accept writes (design §6.5); MCCS brightness max is 100.
       maximum = 100
     }
     guard maximum != 0 else {
