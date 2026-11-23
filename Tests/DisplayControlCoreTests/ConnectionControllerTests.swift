@@ -220,22 +220,26 @@ final class ConnectionControllerTests: XCTestCase {
     }
   }
 
-  func testDisconnectRollsBackWhenDisabledDisplayDisappearsFromInventory() {
+  func testDisconnectSucceedsWhenDisabledDisplayDisappearsFromInventory() throws {
     let external = fixture(1, active: true, kind: .external)
     let other = fixture(2, active: true)
     let store = FakeDisplayStore([external, other])
     let ledger = FakeLedger()
-    // macOS drops the display on disable and lists it again when its ID is enabled.
-    store.reactions = [
-      .init(id: 1, enabled: false): [other],
-      .init(id: 1, enabled: true): [external, other],
-    ]
+    // macOS 26.5 and 27 drop a disabled display from the online list (hardware, D-005).
+    store.reactions = [.init(id: 1, enabled: false): [other]]
+    let controller = makeController(store, ledger: ledger)
 
-    XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
-      assertPostcondition($0, contains: ["0 matches", "rollback enabled true completed"])
-    }
-    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
-    XCTAssertEqual(store.displays.first { $0.runtimeID == 1 }?.isActive, true)
+    let display = try controller.disconnect("1")
+
+    XCTAssertEqual(display.uuid, external.uuid)
+    XCTAssertFalse(display.isActive)
+    XCTAssertFalse(display.isOnline)
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false)])
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+
+    // The ledger is then the only route back, and it works.
+    store.reactions = [.init(id: 1, enabled: true): [external, other]]
+    XCTAssertTrue(try controller.connect(external.uuid.uuidString).isActive)
     XCTAssertEqual(ledger.entries, [])
   }
 
@@ -293,6 +297,7 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([external, other])
     let ledger = FakeLedger()
     store.reactions = [.init(id: 1, enabled: false): [other]]
+    store.snapshotFailureCall = 2
     let controller = makeController(store, ledger: ledger, runtimeIDOwner: { _ in hidden })
 
     XCTAssertThrowsError(try controller.disconnect("1")) {
@@ -326,9 +331,10 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([external, other])
     store.reactions = [.init(id: 1, enabled: false): [other]]
     store.failingRequests = [.init(id: 1, enabled: true)]
+    store.snapshotFailureCall = 2
 
     XCTAssertThrowsError(try fileController(store, directory: directory).disconnect("1")) {
-      assertPostcondition($0, contains: ["0 matches", "rollback enabled true failed"])
+      assertPostcondition($0, contains: ["refresh failed", "rollback enabled true failed"])
     }
     XCTAssertEqual(try ledgerEntries(in: directory), [entry(for: external)])
 
@@ -367,11 +373,12 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([external, other])
     let ledger = FakeLedger()
     store.reactions = [.init(id: 1, enabled: false): [other]]
+    store.snapshotFailureCall = 2
     // By the time the rollback looks again, macOS lists the display under a new ID.
     store.displaysAtSnapshot = [3: [renumbered, other]]
 
     XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
-      assertPostcondition($0, contains: ["0 matches", "rollback enabled true completed"])
+      assertPostcondition($0, contains: ["refresh failed", "rollback enabled true completed"])
     }
     XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 5, enabled: true)])
     XCTAssertEqual(ledger.entries, [])
@@ -415,10 +422,12 @@ final class ConnectionControllerTests: XCTestCase {
     let impostor = fixture(uuid: 7, runtimeID: 1, active: false)
     let store = FakeDisplayStore([external, other])
     let ledger = FakeLedger()
-    store.reactions = [.init(id: 1, enabled: false): [other, impostor]]
+    store.reactions = [.init(id: 1, enabled: false): [other]]
+    store.snapshotFailureCall = 2
+    store.displaysAtSnapshot = [3: [other, impostor]]
 
     XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
-      assertPostcondition($0, contains: ["0 matches", "rollback skipped", "runtime ID 1"])
+      assertPostcondition($0, contains: ["refresh failed", "rollback skipped", "runtime ID 1"])
     }
     XCTAssertEqual(store.requests, [.init(id: 1, enabled: false)])
     XCTAssertEqual(ledger.entries, [entry(for: external)])

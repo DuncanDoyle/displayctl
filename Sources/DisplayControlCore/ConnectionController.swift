@@ -328,6 +328,12 @@ public struct ConnectionController: Sendable {
     }
 
     let matches = refreshed.filter { $0.uuid == display.uuid }
+    // macOS drops a disabled display from the online list, so absence means disconnected (D-005).
+    if !enabled, matches.isEmpty {
+      return Display(
+        uuid: display.uuid, runtimeID: display.runtimeID, name: display.name, kind: display.kind,
+        isOnline: false, isActive: false, isMain: false, ddcCapability: display.ddcCapability)
+    }
     guard matches.count == 1, let result = matches.first else {
       throw postconditionFailure(
         "Display \(display.uuid.uuidString) had \(matches.count) matches after requesting "

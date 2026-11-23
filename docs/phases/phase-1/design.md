@@ -135,7 +135,7 @@ Connection changes use this sequence:
 6. Begin a Core Graphics display configuration transaction.
 7. Invoke `CGSConfigureDisplayEnabled` through the private bridge.
 8. Complete the transaction for the current login session.
-9. Refresh inventory and verify the expected postcondition unambiguously.
+9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005).
 10. Release the display-operation lock.
 
 If configuration fails before completion, the transaction is cancelled. Session-scoped changes intentionally revert after logout/login, providing a recovery boundary without requiring a long-running process.
