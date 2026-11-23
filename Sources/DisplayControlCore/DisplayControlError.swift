@@ -7,6 +7,7 @@ public enum DisplayControlError: Error, Equatable, Sendable {
   case unsupportedAPI(String)
   case configurationFailed(String)
   case postconditionFailed(String)
+  case recoverySkipped(String)
   case ddcServiceNotFound
   case ddcServiceAmbiguous
   case ddcUnsupported

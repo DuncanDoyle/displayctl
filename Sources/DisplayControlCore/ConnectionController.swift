@@ -21,26 +21,26 @@ protocol DisplayOperationLocking: Sendable {
 }
 
 struct DarwinDisplayOperationLock: DisplayOperationLocking {
-  private let configuredLockURL: URL?
+  private let lockURL: URL
   private let maximumAttempts: Int
   private let retryDelayMicroseconds: useconds_t
 
   init(
-    lockURL: URL? = nil,
+    lockURL: URL,
     maximumAttempts: Int = 50,
     retryDelayMicroseconds: useconds_t = 20_000
   ) {
-    configuredLockURL = lockURL
+    self.lockURL = lockURL
     self.maximumAttempts = maximumAttempts
     self.retryDelayMicroseconds = retryDelayMicroseconds
   }
 
   func withLock<T>(_ operation: () throws -> T) throws -> T {
-    let lockURL =
-      configuredLockURL
-      ?? FileManager.default.temporaryDirectory
-      .appendingPathComponent("displaycontrol-connection.lock")
     let path = lockURL.path
+    // A failure here surfaces as the open error below.
+    try? FileManager.default.createDirectory(
+      at: lockURL.deletingLastPathComponent(), withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
     let descriptor = path.withCString {
       open($0, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(S_IRUSR | S_IWUSR))
     }
@@ -90,40 +90,107 @@ public struct ConnectionController: Sendable {
   private let snapshot: any DisplaySnapshotProviding
   private let hardware: any DisplayConnectionHardware
   private let operationLock: any DisplayOperationLocking
+  private let ledger: any DisabledDisplayLedger
+  private let bootTime: @Sendable () throws -> Int64
 
+  /// Creates a controller whose ledger and operation lock live in `stateDirectory`.
   public init(
     snapshot: any DisplaySnapshotProviding,
-    hardware: any DisplayConnectionHardware
+    hardware: any DisplayConnectionHardware,
+    stateDirectory: URL = DisplayControlState.defaultDirectory
   ) {
-    self.snapshot = snapshot
-    self.hardware = hardware
-    operationLock = DarwinDisplayOperationLock()
+    self.init(
+      snapshot: snapshot,
+      hardware: hardware,
+      lock: DarwinDisplayOperationLock(lockURL: DisplayControlState.lockURL(in: stateDirectory)),
+      ledger: FileDisabledDisplayLedger(url: DisplayControlState.ledgerURL(in: stateDirectory)),
+      bootTime: BootTime.current
+    )
   }
 
   init(
     snapshot: any DisplaySnapshotProviding,
     hardware: any DisplayConnectionHardware,
-    lock: any DisplayOperationLocking
+    lock: any DisplayOperationLocking,
+    ledger: any DisabledDisplayLedger,
+    bootTime: @escaping @Sendable () throws -> Int64
   ) {
     self.snapshot = snapshot
     self.hardware = hardware
     operationLock = lock
+    self.ledger = ledger
+    self.bootTime = bootTime
   }
 
-  public func connect(_ selector: String) throws -> Display {
+  /// Returns the ledger's entries without taking the operation lock.
+  public func disabledDisplays() throws -> [DisabledDisplayEntry] {
+    try ledger.load()
+  }
+
+  /// Removes the ledger entry for `uuid` without touching any display.
+  public func forget(_ uuid: UUID) throws -> DisabledDisplayEntry {
     try operationLock.withLock {
-      try connectUnlocked(selector, acceptAlreadyActive: false)
+      let entries = try ledger.load()
+      guard let entry = entries.first(where: { $0.uuid == uuid }) else {
+        throw DisplayControlError.displayNotFound(uuid.uuidString)
+      }
+      try ledger.save(entries.filter { $0.uuid != uuid })
+      return entry
     }
   }
 
+  /// Removes every ledger entry without touching any display.
+  public func forgetAll() throws -> [DisabledDisplayEntry] {
+    try operationLock.withLock {
+      let entries = try ledger.load()
+      if !entries.isEmpty {
+        try ledger.save([])
+      }
+      return entries
+    }
+  }
+
+  /// Enables an online inactive display, or a ledger display that macOS no longer lists when the
+  /// selector is its UUID.
+  public func connect(_ selector: String) throws -> Display {
+    try operationLock.withLock {
+      let displays = try snapshot.snapshot()
+      let display: Display
+      do {
+        display = try DisplaySelector.resolve(selector, in: displays)
+      } catch DisplayControlError.displayNotFound(let missing) {
+        guard let uuid = UUID(uuidString: selector),
+          let entry = try ledger.load().first(where: { $0.uuid == uuid })
+        else {
+          throw DisplayControlError.displayNotFound(missing)
+        }
+        return try reconnect(uuid, entry: entry, acceptAlreadyActive: false)
+      }
+      guard !display.isActive else {
+        throw DisplayControlError.invalidState("Display \(display.runtimeID) is already active")
+      }
+      let result = try transition(display, enabled: true)
+      removeEntry(display.uuid)
+      return result
+    }
+  }
+
+  /// Attempts every online inactive display and every ledger entry once, in that order.
   public func connectAll() throws -> [DisplayConnectionOutcome] {
     try operationLock.withLock {
-      let candidates = try snapshot.snapshot().filter { $0.isOnline && !$0.isActive }
-      return candidates.map { display in
+      let entries = try ledger.load()
+      var candidates = try snapshot.snapshot()
+        .filter { $0.isOnline && !$0.isActive }
+        .map { display in (display, entries.first { $0.uuid == display.uuid }) }
+      let candidateUUIDs = Set(candidates.map(\.0.uuid))
+      candidates += entries.filter { !candidateUUIDs.contains($0.uuid) }.map {
+        ($0.placeholder, $0)
+      }
+
+      return candidates.map { display, entry in
         let result: Result<Display, DisplayControlError>
         do {
-          result = .success(
-            try connectUnlocked(display.uuid.uuidString, acceptAlreadyActive: true))
+          result = .success(try reconnect(display.uuid, entry: entry, acceptAlreadyActive: true))
         } catch let error as DisplayControlError {
           result = .failure(error)
         } catch {
@@ -134,37 +201,80 @@ public struct ConnectionController: Sendable {
     }
   }
 
+  /// Records the display in the ledger, then disables it; a ledger failure leaves it untouched.
   public func disconnect(_ selector: String) throws -> Display {
     try operationLock.withLock {
-      try disconnectUnlocked(selector)
+      let displays = try snapshot.snapshot()
+      let display = try DisplaySelector.resolve(selector, in: displays)
+      guard display.isActive else {
+        throw DisplayControlError.invalidState("Display \(display.runtimeID) is already inactive")
+      }
+      guard displays.filter(\.isActive).count > 1 else {
+        throw DisplayControlError.lastActiveDisplay
+      }
+      let entry = DisabledDisplayEntry(
+        uuid: display.uuid, runtimeID: display.runtimeID, name: display.name, kind: display.kind,
+        bootTime: try bootTime())
+      try ledger.save(try ledger.load().filter { $0.uuid != display.uuid } + [entry])
+      return try transition(display, enabled: false)
     }
   }
 
-  private func connectUnlocked(
-    _ selector: String,
+  /// Enables `uuid` by its current runtime ID, or by the entry's recorded ID when it is offline.
+  private func reconnect(
+    _ uuid: UUID,
+    entry: DisabledDisplayEntry?,
     acceptAlreadyActive: Bool
   ) throws -> Display {
     let displays = try snapshot.snapshot()
-    let display = try DisplaySelector.resolve(selector, in: displays)
-    if display.isActive, acceptAlreadyActive {
-      return display
+    let matches = displays.filter { $0.uuid == uuid }
+    guard matches.count <= 1 else {
+      throw DisplayControlError.ambiguousSelector(uuid.uuidString)
     }
-    guard !display.isActive else {
-      throw DisplayControlError.invalidState("Display \(display.runtimeID) is already active")
+
+    let result: Display
+    if let online = matches.first {
+      if online.isActive {
+        guard acceptAlreadyActive else {
+          throw DisplayControlError.invalidState("Display \(online.runtimeID) is already active")
+        }
+        result = online
+      } else {
+        result = try transition(online, enabled: true)
+      }
+    } else if let entry {
+      guard BootTime.isSameBoot(entry.bootTime, try bootTime()) else {
+        throw DisplayControlError.recoverySkipped(
+          "Display \(uuid.uuidString) was disabled in an earlier boot; its recorded runtime ID "
+            + "\(entry.runtimeID) is not trusted")
+      }
+      try requireRuntimeIDUnclaimed(entry.runtimeID, by: uuid, in: displays)
+      result = try transition(entry.placeholder, enabled: true)
+    } else {
+      throw DisplayControlError.displayNotFound(uuid.uuidString)
     }
-    return try transition(display, enabled: true)
+    removeEntry(uuid)
+    return result
   }
 
-  private func disconnectUnlocked(_ selector: String) throws -> Display {
-    let displays = try snapshot.snapshot()
-    let display = try DisplaySelector.resolve(selector, in: displays)
-    guard display.isActive else {
-      throw DisplayControlError.invalidState("Display \(display.runtimeID) is already inactive")
+  private func requireRuntimeIDUnclaimed(
+    _ runtimeID: UInt32,
+    by uuid: UUID,
+    in displays: [Display]
+  ) throws {
+    if let holder = displays.first(where: { $0.runtimeID == runtimeID && $0.uuid != uuid }) {
+      throw DisplayControlError.recoverySkipped(
+        "Display \(uuid.uuidString) is offline and its recorded runtime ID \(runtimeID) is now "
+          + "held by display \(holder.uuid.uuidString)")
     }
-    guard displays.filter(\.isActive).count > 1 else {
-      throw DisplayControlError.lastActiveDisplay
+  }
+
+  /// Drops the entry of a display verified active; a failed write keeps it for `connect all`.
+  private func removeEntry(_ uuid: UUID) {
+    guard let entries = try? ledger.load(), entries.contains(where: { $0.uuid == uuid }) else {
+      return
     }
-    return try transition(display, enabled: false)
+    try? ledger.save(entries.filter { $0.uuid != uuid })
   }
 
   private func transition(_ display: Display, enabled: Bool) throws -> Display {
@@ -209,16 +319,43 @@ public struct ConnectionController: Sendable {
     guard !enabled else {
       return .postconditionFailed(message)
     }
+    return .postconditionFailed("\(message); \(rollback(display))")
+  }
 
+  /// Re-enables a display whose disable failed its postcondition, using the same identity rules
+  /// as `connect`, and describes the result.
+  private func rollback(_ display: Display) -> String {
     do {
-      try hardware.setEnabled(display.runtimeID, enabled: true)
-      return .postconditionFailed(
-        "\(message); rollback enabled true completed for display \(display.runtimeID)"
-      )
+      let displays = try snapshot.snapshot()
+      let matches = displays.filter { $0.uuid == display.uuid }
+      guard matches.count <= 1 else {
+        throw DisplayControlError.ambiguousSelector(display.uuid.uuidString)
+      }
+      let target: Display
+      if let online = matches.first {
+        if online.isActive {
+          removeEntry(display.uuid)
+          return "rollback not needed, display \(online.runtimeID) is active"
+        }
+        target = online
+      } else {
+        try requireRuntimeIDUnclaimed(display.runtimeID, by: display.uuid, in: displays)
+        target = display
+      }
+
+      try hardware.setEnabled(target.runtimeID, enabled: true)
+      let restored = try snapshot.snapshot().filter { $0.uuid == display.uuid }
+      guard restored.count == 1, restored[0].isActive else {
+        return "rollback enabled true for display \(target.runtimeID) did not restore it; "
+          + "ledger entry kept"
+      }
+      removeEntry(display.uuid)
+      return "rollback enabled true completed for display \(target.runtimeID)"
+    } catch DisplayControlError.recoverySkipped(let reason) {
+      return "rollback skipped: \(reason); ledger entry kept"
     } catch {
-      return .postconditionFailed(
-        "\(message); rollback enabled true failed for display \(display.runtimeID): \(error)"
-      )
+      return "rollback enabled true failed for display \(display.runtimeID): \(error); "
+        + "ledger entry kept"
     }
   }
 }
@@ -241,15 +378,28 @@ struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
   }
 }
 
+/// How long a display configuration change lasts.
+public enum DisplayConfigurationScope: Sendable {
+  /// Until logout (`CGConfigureOption.forSession`).
+  case session
+  /// Until this process exits (`CGConfigureOption.forAppOnly`); used by trial disconnects.
+  case appOnly
+}
+
 public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
   private let api: CoreGraphicsDisplayTransactionFunctions
+  /// The scope each transaction is completed with.
+  public let scope: DisplayConfigurationScope
 
-  public init() {
+  /// Creates live hardware whose transactions complete with `scope`.
+  public init(scope: DisplayConfigurationScope = .session) {
     api = .live(bridge: PrivateAPIBridge())
+    self.scope = scope
   }
 
-  init(api: CoreGraphicsDisplayTransactionFunctions) {
+  init(api: CoreGraphicsDisplayTransactionFunctions, scope: DisplayConfigurationScope = .session) {
     self.api = api
+    self.scope = scope
   }
 
   public func setEnabled(_ displayID: UInt32, enabled: Bool) throws {
@@ -282,7 +432,7 @@ public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
         )
       }
 
-      let completeError = api.complete(config, .forSession)
+      let completeError = api.complete(config, scope == .appOnly ? .forAppOnly : .forSession)
       guard completeError == .success else {
         throw nativeFailure(
           "CGCompleteDisplayConfiguration",

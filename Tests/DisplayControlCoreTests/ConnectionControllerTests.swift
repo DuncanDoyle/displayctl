@@ -7,7 +7,7 @@ import XCTest
 final class ConnectionControllerTests: XCTestCase {
   func testConnectInactiveDisplayReturnsRefreshedActiveDisplay() throws {
     let store = FakeDisplayStore([fixture(1, active: false), fixture(2, active: true)])
-    let controller = ConnectionController(snapshot: store, hardware: store)
+    let controller = makeController(store)
 
     let display = try controller.connect("1")
 
@@ -17,7 +17,7 @@ final class ConnectionControllerTests: XCTestCase {
 
   func testDisconnectActiveDisplayReturnsRefreshedInactiveDisplay() throws {
     let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: true)])
-    let controller = ConnectionController(snapshot: store, hardware: store)
+    let controller = makeController(store)
 
     let display = try controller.disconnect("1")
 
@@ -27,7 +27,7 @@ final class ConnectionControllerTests: XCTestCase {
 
   func testRejectsTransitionsFromInvalidStateBeforeHardwareCall() {
     let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: false)])
-    let controller = ConnectionController(snapshot: store, hardware: store)
+    let controller = makeController(store)
 
     XCTAssertThrowsError(try controller.connect("1")) {
       XCTAssertEqual($0 as? DisplayControlError, .invalidState("Display 1 is already active"))
@@ -40,7 +40,7 @@ final class ConnectionControllerTests: XCTestCase {
 
   func testDisconnectRefusesLastActiveBeforeHardwareCall() {
     let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: false)])
-    let controller = ConnectionController(snapshot: store, hardware: store)
+    let controller = makeController(store)
 
     XCTAssertThrowsError(try controller.disconnect("1")) {
       XCTAssertEqual($0 as? DisplayControlError, .lastActiveDisplay)
@@ -51,8 +51,8 @@ final class ConnectionControllerTests: XCTestCase {
   func testConcurrentControllersSerializeLastActiveValidation() {
     let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: true)])
     let operationLock = FakeOperationLock()
-    let first = ConnectionController(snapshot: store, hardware: store, lock: operationLock)
-    let second = ConnectionController(snapshot: store, hardware: store, lock: operationLock)
+    let first = makeController(store, lock: operationLock)
+    let second = makeController(store, lock: operationLock)
     let start = DispatchSemaphore(value: 0)
     let group = DispatchGroup()
     let results = ResultCollector()
@@ -77,7 +77,7 @@ final class ConnectionControllerTests: XCTestCase {
   func testLockFailurePreventsSnapshotAndHardwareAccess() {
     let store = FakeDisplayStore([fixture(1, active: false)])
     let lock = FailingOperationLock(error: .configurationFailed("lock unavailable"))
-    let controller = ConnectionController(snapshot: store, hardware: store, lock: lock)
+    let controller = makeController(store, lock: lock)
 
     XCTAssertThrowsError(try controller.connect("1")) {
       XCTAssertEqual($0 as? DisplayControlError, .configurationFailed("lock unavailable"))
@@ -91,7 +91,7 @@ final class ConnectionControllerTests: XCTestCase {
       fixture(1, active: true, kind: .external),
       fixture(2, active: true, kind: .external),
     ])
-    let controller = ConnectionController(snapshot: store, hardware: store)
+    let controller = makeController(store)
 
     XCTAssertThrowsError(try controller.connect("missing")) {
       XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("missing"))
@@ -105,7 +105,7 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([fixture(1, active: false), fixture(2, active: true)])
     store.appliesChanges = false
 
-    XCTAssertThrowsError(try ConnectionController(snapshot: store, hardware: store).connect("1")) {
+    XCTAssertThrowsError(try makeController(store).connect("1")) {
       assertPostcondition($0, contains: [store.displays[0].uuid.uuidString, "active"])
     }
     XCTAssertEqual(store.snapshotCount, 2)
@@ -116,7 +116,7 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore(displays)
     store.failureIDs = [3]
 
-    let outcomes = try ConnectionController(snapshot: store, hardware: store).connectAll()
+    let outcomes = try makeController(store).connectAll()
 
     XCTAssertEqual(store.requests, [.init(id: 3, enabled: true), .init(id: 2, enabled: true)])
     XCTAssertEqual(outcomes.map(\.display), [displays[0], displays[2]])
@@ -130,8 +130,7 @@ final class ConnectionControllerTests: XCTestCase {
     ])
     store.activateWhenEnabled = [1: 2]
     let operationLock = FakeOperationLock()
-    let controller = ConnectionController(
-      snapshot: store, hardware: store, lock: operationLock)
+    let controller = makeController(store, lock: operationLock)
 
     let outcomes = try controller.connectAll()
 
@@ -198,7 +197,7 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([fixture(1, active: false)])
     store.snapshotFailureCall = 2
 
-    XCTAssertThrowsError(try controller(store).connect("1")) {
+    XCTAssertThrowsError(try makeController(store).connect("1")) {
       assertPostcondition($0, contains: [store.displays[0].uuid.uuidString, "refresh failed"])
     }
   }
@@ -207,7 +206,7 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([fixture(1, active: false)])
     store.duplicateAfterMutation = true
 
-    XCTAssertThrowsError(try controller(store).connect("1")) {
+    XCTAssertThrowsError(try makeController(store).connect("1")) {
       assertPostcondition($0, contains: [store.displays[0].uuid.uuidString, "2 matches"])
     }
   }
@@ -216,24 +215,279 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([fixture(1, active: false)])
     store.removeAfterMutation = true
 
-    XCTAssertThrowsError(try controller(store).connect("1")) {
+    XCTAssertThrowsError(try makeController(store).connect("1")) {
       assertPostcondition($0, contains: ["0 matches"])
     }
   }
 
   func testDisconnectRollsBackWhenDisabledDisplayDisappearsFromInventory() {
-    let store = FakeDisplayStore([
-      fixture(1, active: true, kind: .external),
-      fixture(2, active: true),
-    ])
-    store.removeAfterDisable = true
-    store.restoreRemovedOnEnable = true
+    let external = fixture(1, active: true, kind: .external)
+    let other = fixture(2, active: true)
+    let store = FakeDisplayStore([external, other])
+    let ledger = FakeLedger()
+    // macOS drops the display on disable and lists it again when its ID is enabled.
+    store.reactions = [
+      .init(id: 1, enabled: false): [other],
+      .init(id: 1, enabled: true): [external, other],
+    ]
 
-    XCTAssertThrowsError(try controller(store).disconnect("1")) {
-      assertPostcondition($0, contains: ["0 matches", "rollback enabled true"])
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
+      assertPostcondition($0, contains: ["0 matches", "rollback enabled true completed"])
     }
     XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
     XCTAssertEqual(store.displays.first { $0.runtimeID == 1 }?.isActive, true)
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  func testDisconnectRecordsLedgerEntryBeforeDisabling() throws {
+    let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: true)])
+    let ledger = FakeLedger()
+    let controller = makeController(store, ledger: ledger)
+
+    _ = try controller.disconnect("1")
+
+    XCTAssertEqual(ledger.entries, [entry(for: store.initialDisplays[0])])
+  }
+
+  // Acceptance test 1.
+  func testLaterConnectAllRestoresDisplayWhoseRollbackFailed() throws {
+    let directory = uniqueStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let external = fixture(1, active: true, kind: .external)
+    let other = fixture(2, active: true)
+    let store = FakeDisplayStore([external, other])
+    store.reactions = [.init(id: 1, enabled: false): [other]]
+    store.failingRequests = [.init(id: 1, enabled: true)]
+
+    XCTAssertThrowsError(try fileController(store, directory: directory).disconnect("1")) {
+      assertPostcondition($0, contains: ["0 matches", "rollback enabled true failed"])
+    }
+    XCTAssertEqual(try ledgerEntries(in: directory), [entry(for: external)])
+
+    // A new process: macOS now honours the enable and lists the display again.
+    store.failingRequests = []
+    store.reactions = [.init(id: 1, enabled: true): [external, other]]
+    let outcomes = try fileController(store, directory: directory).connectAll()
+
+    XCTAssertEqual(outcomes.map(\.display.uuid), [external.uuid])
+    XCTAssertEqual(try outcomes[0].result.get().isActive, true)
+    XCTAssertEqual(store.requests.last, .init(id: 1, enabled: true))
+    XCTAssertEqual(try ledgerEntries(in: directory), [])
+  }
+
+  // Acceptance test 2.
+  func testConnectUUIDForLedgerOnlyDisplayEnablesRecordedIDAndClearsEntry() throws {
+    let external = fixture(1, active: true, kind: .external)
+    let other = fixture(2, active: true)
+    let store = FakeDisplayStore([other])
+    let ledger = FakeLedger([entry(for: external)])
+    store.reactions = [.init(id: 1, enabled: true): [external, other]]
+
+    let display = try makeController(store, ledger: ledger).connect(external.uuid.uuidString)
+
+    XCTAssertEqual(display.uuid, external.uuid)
+    XCTAssertTrue(display.isActive)
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: true)])
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  // Acceptance test 3.
+  func testRollbackEnablesCurrentRuntimeIDWhenUUIDReappearsUnderNewID() {
+    let external = fixture(1, active: true, kind: .external)
+    let other = fixture(2, active: true)
+    let renumbered = fixture(uuid: 1, runtimeID: 5, active: false)
+    let store = FakeDisplayStore([external, other])
+    let ledger = FakeLedger()
+    store.reactions = [.init(id: 1, enabled: false): [other]]
+    // By the time the rollback looks again, macOS lists the display under a new ID.
+    store.displaysAtSnapshot = [3: [renumbered, other]]
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
+      assertPostcondition($0, contains: ["0 matches", "rollback enabled true completed"])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 5, enabled: true)])
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  func testConnectUUIDUsesCurrentRuntimeIDWhenOnlineUnderNewID() throws {
+    let renumbered = fixture(uuid: 1, runtimeID: 5, active: false)
+    let store = FakeDisplayStore([renumbered, fixture(2, active: true)])
+    let ledger = FakeLedger([entry(for: renumbered, runtimeID: 1)])
+
+    let display = try makeController(store, ledger: ledger).connect(renumbered.uuid.uuidString)
+
+    XCTAssertEqual(display.runtimeID, 5)
+    XCTAssertEqual(store.requests, [.init(id: 5, enabled: true)])
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  // Acceptance test 4.
+  func testRecordedIDHeldByAnotherUUIDIsSkippedWithoutMutation() throws {
+    let external = fixture(1, active: true, kind: .external)
+    let impostor = fixture(uuid: 7, runtimeID: 1, active: true)
+    let store = FakeDisplayStore([impostor, fixture(2, active: true)])
+    let ledger = FakeLedger([entry(for: external)])
+    let controller = makeController(store, ledger: ledger)
+
+    XCTAssertThrowsError(try controller.connect(external.uuid.uuidString)) {
+      assertSkipped($0, contains: ["runtime ID 1", impostor.uuid.uuidString])
+    }
+    let outcomes = try controller.connectAll()
+
+    XCTAssertEqual(outcomes.map(\.display.uuid), [external.uuid])
+    guard case .failure(let error) = outcomes[0].result else { return XCTFail("expected skip") }
+    assertSkipped(error, contains: ["runtime ID 1"])
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+  }
+
+  func testRollbackSkipsRecordedIDNowHeldByAnotherUUID() {
+    let external = fixture(1, active: true, kind: .external)
+    let other = fixture(2, active: true)
+    let impostor = fixture(uuid: 7, runtimeID: 1, active: false)
+    let store = FakeDisplayStore([external, other])
+    let ledger = FakeLedger()
+    store.reactions = [.init(id: 1, enabled: false): [other, impostor]]
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
+      assertPostcondition($0, contains: ["0 matches", "rollback skipped", "runtime ID 1"])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false)])
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+  }
+
+  // Acceptance test 5.
+  func testEntryFromEarlierBootIsSkippedWithoutMutation() throws {
+    let external = fixture(1, active: true, kind: .external)
+    let store = FakeDisplayStore([fixture(2, active: true)])
+    let stale = entry(for: external, bootTime: currentBoot - 86_400)
+    let ledger = FakeLedger([stale])
+    let controller = makeController(store, ledger: ledger)
+
+    XCTAssertThrowsError(try controller.connect(external.uuid.uuidString)) {
+      assertSkipped($0, contains: ["earlier boot"])
+    }
+    let outcomes = try controller.connectAll()
+
+    XCTAssertEqual(outcomes.count, 1)
+    guard case .failure(let error) = outcomes[0].result else { return XCTFail("expected skip") }
+    assertSkipped(error, contains: ["earlier boot"])
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [stale])
+  }
+
+  // Acceptance test 6.
+  func testEnableWithoutUUIDBecomingActiveFailsAndKeepsEntry() {
+    let external = fixture(1, active: true, kind: .external)
+    let store = FakeDisplayStore([fixture(2, active: true)])
+    let ledger = FakeLedger([entry(for: external)])
+
+    XCTAssertThrowsError(
+      try makeController(store, ledger: ledger).connect(external.uuid.uuidString)
+    ) {
+      assertPostcondition($0, contains: [external.uuid.uuidString, "0 matches"])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: true)])
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+  }
+
+  // Acceptance test 7.
+  func testLedgerWriteFailureRefusesDisconnectWithoutHardwareCall() throws {
+    let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: true)])
+    let ledger = FakeLedger()
+    ledger.saveError = .configurationFailed("disk full")
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
+      XCTAssertEqual($0 as? DisplayControlError, .configurationFailed("disk full"))
+    }
+    XCTAssertEqual(store.requests, [])
+
+    // The file ledger fails the same way when its directory is read-only.
+    let directory = uniqueStateDirectory()
+    try FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o500])
+    defer {
+      try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o700], ofItemAtPath: directory.path)
+      try? FileManager.default.removeItem(at: directory)
+    }
+    let fileLedger = FileDisabledDisplayLedger(url: DisplayControlState.ledgerURL(in: directory))
+    XCTAssertThrowsError(try makeController(store, ledger: fileLedger).disconnect("1")) {
+      guard case .configurationFailed(let message) = $0 as? DisplayControlError else {
+        return XCTFail("unexpected error \($0)")
+      }
+      XCTAssertTrue(message.contains("Unable to write display ledger"), message)
+    }
+    XCTAssertEqual(store.requests, [])
+  }
+
+  // Acceptance test 8.
+  func testConnectAllReportsStaleEntryAndStillReconnectsOthers() throws {
+    let unplugged = fixture(1, active: true, kind: .external)
+    let inactive = fixture(3, active: false)
+    let store = FakeDisplayStore([fixture(2, active: true), inactive])
+    let ledger = FakeLedger([entry(for: unplugged)])
+    store.failingRequests = [.init(id: 1, enabled: true)]
+
+    let outcomes = try makeController(store, ledger: ledger).connectAll()
+
+    XCTAssertEqual(outcomes.map(\.display.uuid), [inactive.uuid, unplugged.uuid])
+    XCTAssertEqual(try outcomes[0].result.get().isActive, true)
+    assertFailure(outcomes[1].result, .configurationFailed("fake failure 1"))
+    XCTAssertEqual(store.requests, [.init(id: 3, enabled: true), .init(id: 1, enabled: true)])
+    XCTAssertEqual(ledger.entries, [entry(for: unplugged)])
+  }
+
+  func testConnectAllClearsEntryForDisplayAlreadyActiveAgain() throws {
+    let reverted = fixture(1, active: true, kind: .external)
+    let store = FakeDisplayStore([reverted, fixture(2, active: true)])
+    let ledger = FakeLedger([entry(for: reverted)])
+
+    let outcomes = try makeController(store, ledger: ledger).connectAll()
+
+    XCTAssertEqual(outcomes.map(\.display.uuid), [reverted.uuid])
+    XCTAssertEqual(try outcomes[0].result.get().isActive, true)
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  func testForgetRemovesEntriesWithoutTouchingDisplays() throws {
+    let first = fixture(1, active: true, kind: .external)
+    let second = fixture(3, active: true, kind: .external)
+    let store = FakeDisplayStore([fixture(2, active: true)])
+    let ledger = FakeLedger([entry(for: first), entry(for: second)])
+    let controller = makeController(store, ledger: ledger)
+
+    XCTAssertEqual(try controller.forget(first.uuid), entry(for: first))
+    XCTAssertEqual(ledger.entries, [entry(for: second)])
+    XCTAssertThrowsError(try controller.forget(first.uuid)) {
+      XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(first.uuid.uuidString))
+    }
+    XCTAssertEqual(try controller.forgetAll(), [entry(for: second)])
+    XCTAssertEqual(ledger.entries, [])
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(store.snapshotCount, 0)
+  }
+
+  func testFileLedgerRoundTripsAndTreatsMissingFileAsEmpty() throws {
+    let directory = uniqueStateDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let ledger = FileDisabledDisplayLedger(url: DisplayControlState.ledgerURL(in: directory))
+    let recorded = entry(for: fixture(1, active: true, kind: .external))
+
+    XCTAssertEqual(try ledger.load(), [])
+    try ledger.save([recorded])
+
+    XCTAssertEqual(try ledger.load(), [recorded])
+  }
+
+  func testBootTimeIsStableWithinABoot() throws {
+    let boot = try BootTime.current()
+
+    XCTAssertGreaterThan(boot, 0)
+    XCTAssertLessThanOrEqual(boot, Int64(Date().timeIntervalSince1970))
+    XCTAssertTrue(BootTime.isSameBoot(boot, try BootTime.current()))
+    XCTAssertFalse(BootTime.isSameBoot(boot, boot - 3_600))
   }
 
   func testCoreGraphicsTransactionCancelsEveryFailureAfterBegin() {
@@ -269,6 +523,16 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(api.enableConfigs, [api.config])
     XCTAssertEqual(api.completeConfigs, [api.config])
     XCTAssertEqual(api.completeOptions, [.forSession])
+  }
+
+  // Acceptance test 9 (Core part).
+  func testAppOnlyScopeCompletesTransactionForAppOnly() throws {
+    let api = FakeTransactionAPI()
+
+    try CoreGraphicsDisplayConnectionHardware(api: api.functions, scope: .appOnly)
+      .setEnabled(7, enabled: false)
+
+    XCTAssertEqual(api.completeOptions, [.forAppOnly])
   }
 
   func testCoreGraphicsTransactionCancelsNilConfigAndResolutionFailure() {
@@ -308,21 +572,23 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
 {
   var displays: [Display]
   let initialDisplays: [Display]
-  struct Request: Equatable {
+  struct Request: Hashable {
     let id: UInt32
     let enabled: Bool
   }
   var requests: [Request] = []
   var failureIDs: Set<UInt32> = []
+  var failingRequests: Set<Request> = []
+  /// What macOS lists after a request; replaces the default toggle of the matching runtime ID.
+  var reactions: [Request: [Display]] = [:]
+  /// What macOS lists from the given snapshot call onwards (1-based).
+  var displaysAtSnapshot: [Int: [Display]] = [:]
   var appliesChanges = true
   var snapshotCount = 0
   var snapshotFailureCall: Int?
   var activateWhenEnabled: [UInt32: UInt32] = [:]
   var duplicateAfterMutation = false
   var removeAfterMutation = false
-  var removeAfterDisable = false
-  var restoreRemovedOnEnable = false
-  private var removedDisplays: [UInt32: Display] = [:]
 
   init(_ displays: [Display]) {
     self.displays = displays
@@ -334,18 +600,20 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
     if snapshotCount == snapshotFailureCall {
       throw DisplayControlError.configurationFailed("refresh failed")
     }
+    if let scripted = displaysAtSnapshot[snapshotCount] {
+      displays = scripted
+    }
     return displays
   }
 
   func setEnabled(_ displayID: UInt32, enabled: Bool) throws {
-    requests.append(.init(id: displayID, enabled: enabled))
-    if failureIDs.contains(displayID) {
+    let request = Request(id: displayID, enabled: enabled)
+    requests.append(request)
+    if failureIDs.contains(displayID) || failingRequests.contains(request) {
       throw DisplayControlError.configurationFailed("fake failure \(displayID)")
     }
-    if enabled, restoreRemovedOnEnable,
-      let removedDisplay = removedDisplays.removeValue(forKey: displayID)
-    {
-      displays.append(replacing(removedDisplay, active: true))
+    if let reaction = reactions[request] {
+      displays = reaction
       return
     }
     guard appliesChanges, let index = displays.firstIndex(where: { $0.runtimeID == displayID })
@@ -360,10 +628,6 @@ private final class FakeDisplayStore: DisplaySnapshotProviding, DisplayConnectio
     }
     if duplicateAfterMutation {
       displays.append(displays[index])
-    }
-    if removeAfterDisable, !enabled {
-      removedDisplays[displayID] = displays[index]
-      displays.remove(at: index)
     }
     if removeAfterMutation {
       displays.remove(at: index)
@@ -525,8 +789,82 @@ private func assertFailure(
   }
 }
 
-private func controller(_ store: FakeDisplayStore) -> ConnectionController {
-  ConnectionController(snapshot: store, hardware: store, lock: FakeOperationLock())
+private let currentBoot: Int64 = 1_800_000_000
+
+private func makeController(
+  _ store: FakeDisplayStore,
+  lock: any DisplayOperationLocking = FakeOperationLock(),
+  ledger: any DisabledDisplayLedger = FakeLedger(),
+  bootTime: Int64 = currentBoot
+) -> ConnectionController {
+  ConnectionController(
+    snapshot: store, hardware: store, lock: lock, ledger: ledger, bootTime: { bootTime })
+}
+
+private func entry(
+  for display: Display, runtimeID: UInt32? = nil, bootTime: Int64 = currentBoot
+) -> DisabledDisplayEntry {
+  DisabledDisplayEntry(
+    uuid: display.uuid, runtimeID: runtimeID ?? display.runtimeID, name: display.name,
+    kind: display.kind, bootTime: bootTime)
+}
+
+/// A display whose UUID comes from `id` but whose runtime ID is set separately.
+private func fixture(
+  uuid id: UInt32, runtimeID: UInt32, active: Bool, kind: DisplayKind = .external
+) -> Display {
+  let base = fixture(id, active: active, kind: kind)
+  return Display(
+    uuid: base.uuid, runtimeID: runtimeID, name: base.name, kind: kind, isOnline: true,
+    isActive: active, isMain: false, ddcCapability: .unknown)
+}
+
+/// A controller backed by the real file ledger and lock in `directory`, as a new process would be.
+private func fileController(_ store: FakeDisplayStore, directory: URL) -> ConnectionController {
+  ConnectionController(
+    snapshot: store, hardware: store,
+    lock: DarwinDisplayOperationLock(lockURL: DisplayControlState.lockURL(in: directory)),
+    ledger: FileDisabledDisplayLedger(url: DisplayControlState.ledgerURL(in: directory)),
+    bootTime: { currentBoot })
+}
+
+private func ledgerEntries(in directory: URL) throws -> [DisabledDisplayEntry] {
+  try FileDisabledDisplayLedger(url: DisplayControlState.ledgerURL(in: directory)).load()
+}
+
+private func assertSkipped(_ error: Error, contains fragments: [String]) {
+  guard case .recoverySkipped(let message) = error as? DisplayControlError else {
+    return XCTFail("unexpected error \(error)")
+  }
+  for fragment in fragments {
+    XCTAssertTrue(message.contains(fragment), "\(message) does not contain \(fragment)")
+  }
+}
+
+private func uniqueStateDirectory() -> URL {
+  FileManager.default.temporaryDirectory
+    .appendingPathComponent("displaycontrol-tests-\(UUID().uuidString)", isDirectory: true)
+}
+
+private final class FakeLedger: DisabledDisplayLedger, @unchecked Sendable {
+  private let lock = NSLock()
+  private var stored: [DisabledDisplayEntry]
+  var saveError: DisplayControlError?
+
+  init(_ entries: [DisabledDisplayEntry] = []) {
+    stored = entries
+  }
+
+  var entries: [DisabledDisplayEntry] { lock.withLock { stored } }
+
+  func load() throws -> [DisabledDisplayEntry] { entries }
+
+  func save(_ entries: [DisabledDisplayEntry]) throws {
+    try lock.withLock {
+      if let saveError { throw saveError }
+      stored = entries
+    }
+  }
 }
 
 private func assertPostcondition(_ error: Error, contains fragments: [String]) {

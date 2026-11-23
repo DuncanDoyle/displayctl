@@ -8,6 +8,9 @@ enum CLICommand: Equatable {
   case connect(selector: String)
   case connectAll
   case disconnect(selector: String)
+  case disconnectTrial(selector: String, seconds: Int)
+  case forget(uuid: UUID)
+  case forgetAll
   case brightnessGet(selector: String)
   case brightnessSet(selector: String, percent: Int)
 }
@@ -30,6 +33,22 @@ enum CLIParser {
     }
     if arguments.count == 2, arguments[0] == "disconnect" {
       return .disconnect(selector: try parseSelector(arguments[1]))
+    }
+    if arguments.count >= 3, arguments[0] == "disconnect", arguments[2] == "--trial" {
+      let selector = try parseSelector(arguments[1])
+      guard arguments.count == 4, let seconds = Int(arguments[3]), 1...60 ~= seconds else {
+        throw DisplayControlError.invalidArguments("--trial needs a number of seconds from 1 to 60")
+      }
+      return .disconnectTrial(selector: selector, seconds: seconds)
+    }
+    if arguments == ["forget", "all"] {
+      return .forgetAll
+    }
+    if arguments.count == 2, arguments[0] == "forget" {
+      guard let uuid = UUID(uuidString: arguments[1]) else {
+        throw DisplayControlError.invalidArguments("forget needs a display UUID or all")
+      }
+      return .forget(uuid: uuid)
     }
     if arguments.count == 3, arguments[0...1] == ["brightness", "get"] {
       return .brightnessGet(selector: try parseSelector(arguments[2]))
@@ -57,25 +76,45 @@ protocol CLIService: Sendable {
   func connect(_ selector: String) async throws -> Display
   func connectAll() async throws -> [DisplayConnectionOutcome]
   func disconnect(_ selector: String) async throws -> Display
+  func disconnectTrial(_ selector: String) async throws -> Display
+  func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry]
+  func disabledDisplays() async throws -> [DisabledDisplayEntry]
   func brightnessGet(_ selector: String) async throws -> (Display, DDCValue)
   func brightnessSet(_ selector: String, percent: Int) async throws -> Display
 }
 struct LiveCLIService: CLIService {
   private let inventory: DisplayInventory
   private let connection: ConnectionController
+  private let trialConnection: ConnectionController
   private let brightness: DDCBrightnessController
   init() {
     let inventory = DisplayInventory()
     self.inventory = inventory
     connection = ConnectionController(
-      snapshot: inventory, hardware: CoreGraphicsDisplayConnectionHardware())
+      snapshot: inventory, hardware: Self.hardware(trial: false))
+    trialConnection = ConnectionController(
+      snapshot: inventory, hardware: Self.hardware(trial: true))
     brightness = DDCBrightnessController()
+  }
+  /// Trial disconnects complete with the app-only scope so macOS reverts them at process exit.
+  static func hardware(trial: Bool) -> CoreGraphicsDisplayConnectionHardware {
+    CoreGraphicsDisplayConnectionHardware(scope: trial ? .appOnly : .session)
   }
   func list() async throws -> [Display] { try inventory.snapshot() }
   func connect(_ selector: String) async throws -> Display { try connection.connect(selector) }
   func connectAll() async throws -> [DisplayConnectionOutcome] { try connection.connectAll() }
   func disconnect(_ selector: String) async throws -> Display {
     try connection.disconnect(selector)
+  }
+  func disconnectTrial(_ selector: String) async throws -> Display {
+    try trialConnection.disconnect(selector)
+  }
+  func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry] {
+    guard let uuid else { return try connection.forgetAll() }
+    return [try connection.forget(uuid)]
+  }
+  func disabledDisplays() async throws -> [DisabledDisplayEntry] {
+    try connection.disabledDisplays()
   }
   func brightnessGet(_ selector: String) async throws -> (Display, DDCValue) {
     let display = try DisplaySelector.resolve(selector, in: inventory.snapshot())
@@ -91,6 +130,8 @@ struct CLIResult: Equatable, Sendable {
   var stdout = ""
   var stderr = ""
   var exitCode: Int32 = 0
+  /// Seconds to keep the process alive after printing, for trial disconnects.
+  var holdSeconds = 0
 }
 struct CLIApplication: Sendable {
   static let help = """
@@ -99,11 +140,15 @@ struct CLIApplication: Sendable {
       displayctl list [--json]
       displayctl connect <selector>
       displayctl connect all
-      displayctl disconnect <selector>
+      displayctl disconnect <selector> [--trial <1...60>]
+      displayctl forget <uuid|all>
       displayctl brightness get <selector>
       displayctl brightness set <selector> <0...100>
 
     Selectors: display UUID, runtime display ID, internal, or external.
+    connect also accepts the UUID of a display that disconnect recorded and macOS no longer lists.
+    --trial disables for the current process only, holds it up to the given seconds, then exits.
+    forget drops recorded displays without changing any display.
     """
   private let service: any CLIService
   init(service: any CLIService) { self.service = service }
@@ -125,13 +170,23 @@ struct CLIApplication: Sendable {
       case .help:
         return CLIResult(stdout: Self.help + "\n")
       case .list(let json):
-        return CLIResult(stdout: try renderList(await service.list(), json: json))
+        let displays = try await service.list()
+        return CLIResult(
+          stdout: try renderList(displays, json: json),
+          stderr: await ledgerOnlyNote(displays))
       case .connect(let selector):
         return CLIResult(stdout: mutation("connected", try await service.connect(selector)))
       case .disconnect(let selector):
         return CLIResult(stdout: mutation("disconnected", try await service.disconnect(selector)))
       case .connectAll:
         return try await connectAll()
+      case .disconnectTrial(let selector, let seconds):
+        let display = try await service.disconnectTrial(selector)
+        return CLIResult(stdout: mutation("disconnected", display), holdSeconds: seconds)
+      case .forget(let uuid):
+        return CLIResult(stdout: forgotten(try await service.forget(uuid)))
+      case .forgetAll:
+        return CLIResult(stdout: forgotten(try await service.forget(nil)))
       case .brightnessGet(let selector):
         let (display, value) = try await service.brightnessGet(selector)
         return CLIResult(
@@ -171,6 +226,20 @@ struct CLIApplication: Sendable {
     }
     return lines.joined(separator: "\n") + "\n"
   }
+  /// Names ledger displays macOS no longer lists; a ledger read failure is not a list failure.
+  private func ledgerOnlyNote(_ displays: [Display]) async -> String {
+    let online = Set(displays.map(\.uuid))
+    let entries = (try? await service.disabledDisplays()) ?? []
+    return entries.filter { !online.contains($0.uuid) }.map {
+      "note: disabled by displayctl and not online: uuid=\($0.uuid.uuidString) "
+        + "runtimeID=\($0.runtimeID) name=\(escape($0.name))\n"
+    }.joined()
+  }
+  private func forgotten(_ entries: [DisabledDisplayEntry]) -> String {
+    entries.map {
+      "forgot uuid=\($0.uuid.uuidString) runtimeID=\($0.runtimeID) name=\(escape($0.name))\n"
+    }.joined()
+  }
   private func mutation(_ verb: String, _ display: Display) -> String {
     "\(verb) \(identity(display)) active=\(display.isActive)\n"
   }
@@ -204,6 +273,7 @@ struct CLIApplication: Sendable {
     case .unsupportedAPI(let message): "Unsupported API: \(message)"
     case .configurationFailed(let message): "Display configuration failed: \(message)"
     case .postconditionFailed(let message): "Display postcondition failed: \(message)"
+    case .recoverySkipped(let message): "Recovery skipped: \(message)"
     case .ddcServiceNotFound: "DDC service not found"
     case .ddcServiceAmbiguous: "DDC service match is ambiguous"
     case .ddcUnsupported: "DDC is unsupported"
@@ -217,4 +287,6 @@ let cliResult = await CLIApplication.run(
   arguments: Array(CommandLine.arguments.dropFirst()), serviceFactory: { LiveCLIService() })
 if !cliResult.stdout.isEmpty { FileHandle.standardOutput.write(Data(cliResult.stdout.utf8)) }
 if !cliResult.stderr.isEmpty { FileHandle.standardError.write(Data(cliResult.stderr.utf8)) }
+// A trial disable lasts only while this process runs; exiting reverts it.
+if cliResult.holdSeconds > 0 { sleep(UInt32(cliResult.holdSeconds)) }
 exit(cliResult.exitCode)

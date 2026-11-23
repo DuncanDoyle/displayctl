@@ -132,6 +132,7 @@ final class CLIParserTests: XCTestCase {
       (.unsupportedAPI("CGS"), "Unsupported API: CGS", 69),
       (.configurationFailed("CG"), "Display configuration failed: CG", 1),
       (.postconditionFailed("state"), "Display postcondition failed: state", 1),
+      (.recoverySkipped("boot"), "Recovery skipped: boot", 1),
       (.ddcServiceNotFound, "DDC service not found", 69),
       (.ddcServiceAmbiguous, "DDC service match is ambiguous", 69),
       (.ddcUnsupported, "DDC is unsupported", 69), (.ddcTimeout, "DDC operation timed out", 75),
@@ -144,20 +145,101 @@ final class CLIParserTests: XCTestCase {
       XCTAssertEqual(result, CLIResult(stderr: "error: \(message)\n", exitCode: code))
     }
   }
+  // Acceptance test 9 (CLI part).
+  func testParsesTrialAndForgetAndRejectsBadTrialValues() async throws {
+    let valid: [([String], CLICommand)] = [
+      (["disconnect", "42", "--trial", "1"], .disconnectTrial(selector: "42", seconds: 1)),
+      (
+        ["disconnect", "internal", "--trial", "60"],
+        .disconnectTrial(selector: "internal", seconds: 60)
+      ),
+      (["forget", "all"], .forgetAll),
+      (["forget", uuid.uuidString.lowercased()], .forget(uuid: uuid)),
+    ]
+    for (arguments, command) in valid { XCTAssertEqual(try CLIParser.parse(arguments), command) }
+    let invalid = [
+      ["disconnect", "42", "--trial"], ["disconnect", "42", "--trial", "0"],
+      ["disconnect", "42", "--trial", "61"], ["disconnect", "42", "--trial", "x"],
+      ["disconnect", "42", "--trial", "5", "extra"], ["disconnect", "--trial", "5"],
+      ["disconnect", "all", "--trial", "5"], ["forget"], ["forget", "42"],
+      ["forget", "all", "extra"],
+    ]
+    for arguments in invalid {
+      let result = await CLIApplication.run(arguments: arguments) { StubService() }
+      XCTAssertEqual(result.exitCode, 64, "\(arguments)")
+    }
+  }
+  func testTrialDisconnectUsesAppOnlyHardwareAndHoldsProcess() async {
+    XCTAssertEqual(LiveCLIService.hardware(trial: true).scope, .appOnly)
+    XCTAssertEqual(LiveCLIService.hardware(trial: false).scope, .session)
+    let service = StubService(displays: [display(active: false)])
+    let result = await CLIApplication(service: service).execute(
+      .disconnectTrial(selector: "42", seconds: 5))
+    XCTAssertEqual(
+      result,
+      CLIResult(
+        stdout:
+          "disconnected uuid=\(uuid.uuidString) runtimeID=42 name=Desk Display active=false\n",
+        holdSeconds: 5))
+    let calls = await service.calls
+    XCTAssertEqual(calls, ["trial:42"])
+    let help = await CLIApplication(service: service).execute(.help)
+    XCTAssertTrue(help.stdout.contains("displayctl disconnect <selector> [--trial <1...60>]"))
+    XCTAssertTrue(help.stdout.contains("displayctl forget <uuid|all>"))
+  }
+  func testForgetReportsRemovedEntries() async {
+    let entry = DisabledDisplayEntry(
+      uuid: uuid, runtimeID: 3, name: "Dell", kind: .external, bootTime: 1)
+    let service = StubService(entries: [entry])
+    let app = CLIApplication(service: service)
+    let one = await app.execute(.forget(uuid: uuid))
+    let all = await app.execute(.forgetAll)
+    let line = "forgot uuid=\(uuid.uuidString) runtimeID=3 name=Dell\n"
+    XCTAssertEqual(one, CLIResult(stdout: line))
+    XCTAssertEqual(all, CLIResult(stdout: line))
+    let calls = await service.calls
+    XCTAssertEqual(calls, ["forget:\(uuid.uuidString)", "forget:all"])
+  }
+  func testListNotesLedgerDisplaysThatAreNotOnline() async {
+    let hidden = DisabledDisplayEntry(
+      uuid: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!, runtimeID: 3,
+      name: "Dell", kind: .external, bootTime: 1)
+    let online = DisabledDisplayEntry(
+      uuid: uuid, runtimeID: 42, name: "Desk Display", kind: .external, bootTime: 1)
+    let app = CLIApplication(
+      service: StubService(displays: [display()], entries: [hidden, online]))
+    let result = await app.execute(.list(json: false))
+    XCTAssertEqual(
+      result.stderr,
+      "note: disabled by displayctl and not online: uuid=\(hidden.uuid.uuidString) runtimeID=3 "
+        + "name=Dell\n")
+    XCTAssertEqual(result.exitCode, 0)
+  }
 }
 private actor StubService: CLIService {
   let displays: [Display]
   let outcomes: [DisplayConnectionOutcome]
   let error: DisplayControlError?
+  let entries: [DisabledDisplayEntry]
   var calls: [String] = []
   init(
     displays: [Display] = [], outcomes: [DisplayConnectionOutcome] = [],
-    error: DisplayControlError? = nil
+    error: DisplayControlError? = nil, entries: [DisabledDisplayEntry] = []
   ) {
     self.displays = displays
     self.outcomes = outcomes
     self.error = error
+    self.entries = entries
   }
+  func disconnectTrial(_ selector: String) async throws -> Display {
+    calls.append("trial:\(selector)")
+    return try checked(displays.last)
+  }
+  func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry] {
+    calls.append("forget:\(uuid?.uuidString ?? "all")")
+    return try checked(entries)
+  }
+  func disabledDisplays() async throws -> [DisabledDisplayEntry] { try checked(entries) }
   func list() async throws -> [Display] { try checked(displays) }
   func connect(_ selector: String) async throws -> Display {
     calls.append("connect:\(selector)")
