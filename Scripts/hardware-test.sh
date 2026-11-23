@@ -577,7 +577,7 @@ if [[ -z "$INTERNAL_UUIDS" || -z "$EXTERNAL_UUIDS" ]]; then
 fi
 EXTERNAL_COUNT="$(printf '%s\n' "$EXTERNAL_UUIDS" | grep -c .)"
 if [[ "$EXTERNAL_COUNT" != "1" ]]; then
-  echo "HDMI validation requires exactly one external display; found $EXTERNAL_COUNT." >&2
+  echo "Hardware validation requires exactly one external display; found $EXTERNAL_COUNT." >&2
   echo "Disconnect other external displays and rerun before any mutation." >&2
   exit 1
 fi
@@ -585,7 +585,7 @@ if [[ "$(grep -c . "$INITIAL_ACTIVE_FILE")" -lt 2 ]]; then
   echo "Both displays must be active before the test starts. Run '$DISPLAYCTL connect all' first." >&2
   exit 1
 fi
-echo "displayctl does not report connector type; verify the external display is physically on HDMI."
+echo "displayctl does not report the connector type; note whether the external display is on HDMI or USB-C."
 
 confirm_exact "I UNDERSTAND THE DISPLAY DISRUPTION"
 trap on_exit EXIT
@@ -595,15 +595,15 @@ trap 'exit 129' HUP
 
 choose_uuid "internal" "$INTERNAL_UUIDS"
 INTERNAL_UUID="$REPLY"
-choose_uuid "external (HDMI)" "$EXTERNAL_UUIDS"
+choose_uuid "external" "$EXTERNAL_UUIDS"
 EXTERNAL_UUID="$REPLY"
-confirm_exact "USE PHYSICALLY HDMI-CONNECTED DISPLAY $EXTERNAL_UUID"
+confirm_exact "USE PHYSICALLY CONNECTED EXTERNAL DISPLAY $EXTERNAL_UUID"
 
 echo ""
-echo "HDMI brightness read (read-back is optional on some monitors):"
+echo "External brightness read (read-back is optional on some monitors):"
 if BRIGHTNESS_RESULT="$(run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" brightness get "$EXTERNAL_UUID")"; then
   echo "$BRIGHTNESS_RESULT"
-  confirm_observed "HDMI brightness get returned a plausible hardware value."
+  confirm_observed "External brightness get returned a plausible hardware value."
 else
   echo "Brightness get was unsupported or failed; record this observed result."
 fi
@@ -614,9 +614,9 @@ if [[ ! "$BRIGHTNESS_PERCENT" =~ ^(0|[1-9][0-9]?|100)$ ]]; then
   echo "Brightness must be a numeric integer from 0 through 100." >&2
   exit 64
 fi
-confirm_exact "SET HDMI BRIGHTNESS $BRIGHTNESS_PERCENT"
+confirm_exact "SET EXTERNAL BRIGHTNESS $BRIGHTNESS_PERCENT"
 run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" brightness set "$EXTERNAL_UUID" "$BRIGHTNESS_PERCENT"
-confirm_observed "The HDMI monitor changed physical brightness."
+confirm_observed "The external monitor changed physical brightness."
 
 # Step 1: internal session-scoped round trip; withholding YES here is the unattended watchdog run.
 session_round_trip "INTERNAL" "$INTERNAL_UUID"
@@ -625,7 +625,7 @@ echo "Internal display steps passed."
 
 # Step 2: external steps, only after the internal pass and a separate opt-in.
 echo ""
-echo "The external steps disable the HDMI display. Only the watchdog and the ledger bring it back."
+echo "The external steps disable the external display. Only the watchdog and the ledger bring it back."
 echo "If they fail, recover with connect all, then logout/login, then a reboot."
 echo "Type exactly the line below to run them; anything else skips them."
 echo "I OPT IN TO EXTERNAL DISPLAY DISCONNECT TESTS"
@@ -671,7 +671,7 @@ if [[ "$OP_OUTPUT" != *"Cannot disconnect the last active display"* ]]; then
   exit 1
 fi
 echo "The command returned the expected last-active-display error."
-confirm_screen "The internal display should still be lit and usable after the refusal."
+confirm_screen "The internal display should still be lit after the refusal. The external display stays off until you type YES; then it is reconnected."
 echo "Reconnecting the displays disconnected for this test..."
 request_op "$CMD_TIMEOUT" connect all || echo "connect all exited $?; the watchdog now verifies the original set." >&2
 printf '%s\n' "$OP_OUTPUT"
