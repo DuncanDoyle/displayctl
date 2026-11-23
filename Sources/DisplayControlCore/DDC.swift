@@ -799,8 +799,8 @@ enum DDCIOReturnMapper {
   }
 }
 
-/// One VCP GET exchange over injected I2C write, read and sleep primitives.
-struct DDCReadExchange {
+/// One VCP GET or SET exchange over injected I2C write, read and sleep primitives.
+struct DDCExchange {
   static let requestRepeatDelayMicroseconds: UInt32 = 10_000
   static let replyDelayMicroseconds: UInt32 = 40_000
   static let maximumReplyLength = 32
@@ -827,6 +827,14 @@ struct DDCReadExchange {
     }
     return try DDCPacket.parseVCPReply(Array(reply.prefix(exactLength)), expectedCode: code)
   }
+
+  // The same monitors ignore a single SET too; repeating it is harmless.
+  func writeVCP(code: UInt8, value: UInt16) throws {
+    let packet = DDCPacket.writeVCP(code: code, value: value)
+    try write(packet)
+    sleep(Self.requestRepeatDelayMicroseconds)
+    try write(packet)
+  }
 }
 
 struct IOAVDDCTransport: DDCTransport {
@@ -850,7 +858,7 @@ struct IOAVDDCTransport: DDCTransport {
     try withService(for: display) { service in
       let write = try bridge.requireIOAVServiceWriteI2C()
       let read = try bridge.requireIOAVServiceReadI2C()
-      let exchange = DDCReadExchange(
+      let exchange = DDCExchange(
         write: { bytes in
           try callWrite(write, service: service, bytes: bytes, display: display)
         },
@@ -875,10 +883,16 @@ struct IOAVDDCTransport: DDCTransport {
   }
 
   func writeVCP(_ code: UInt8, value: UInt16, for display: Display) throws {
-    let packet = DDCPacket.writeVCP(code: code, value: value)
     try withService(for: display) { service in
       let write = try bridge.requireIOAVServiceWriteI2C()
-      try callWrite(write, service: service, bytes: packet, display: display)
+      let exchange = DDCExchange(
+        write: { bytes in
+          try callWrite(write, service: service, bytes: bytes, display: display)
+        },
+        read: { _ in [] },
+        sleep: { delay in usleep(delay) }
+      )
+      try exchange.writeVCP(code: code, value: value)
     }
   }
 

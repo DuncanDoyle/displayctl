@@ -540,7 +540,7 @@ final class DDCTests: XCTestCase {
   func testReadExchangeWritesRequestTwiceBeforeSingleRead() throws {
     var events: [String] = []
     let reply = validReply(current: 25, maximum: 100)
-    let exchange = DDCReadExchange(
+    let exchange = DDCExchange(
       write: { events.append("write \($0)") },
       read: { length in
         events.append("read \(length)")
@@ -557,8 +557,26 @@ final class DDCTests: XCTestCase {
     )
   }
 
+  // Over USB-C a Dell U2720Q ignored a single set; observed on hardware 2026-11-23.
+  func testExchangeWritesSetPacketTwice() throws {
+    var events: [String] = []
+    let exchange = DDCExchange(
+      write: { events.append("write \($0)") },
+      read: { _ in
+        XCTFail("a set must not read")
+        return []
+      },
+      sleep: { events.append("sleep \($0)") }
+    )
+
+    try exchange.writeVCP(code: 0x10, value: 50)
+
+    let packet = DDCPacket.writeVCP(code: 0x10, value: 50)
+    XCTAssertEqual(events, ["write \(packet)", "sleep 10000", "write \(packet)"])
+  }
+
   func testReadExchangeReportsNullMessageFromReadBuffer() {
-    let exchange = DDCReadExchange(
+    let exchange = DDCExchange(
       write: { _ in },
       read: { [0x6E, 0x80, 0xBE] + [UInt8](repeating: 0, count: $0 - 3) },
       sleep: { _ in }
