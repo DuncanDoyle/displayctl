@@ -12,16 +12,16 @@ public struct DisabledDisplayEntry: Codable, Equatable, Sendable {
   public let name: String
   /// Whether the display was internal or external.
   public let kind: DisplayKind
-  /// The boot time (`kern.boottime`, seconds since 1970) of the boot that disabled the display.
-  public let bootTime: Int64
+  /// The `kern.bootsessionuuid` of the boot that disabled the display.
+  public let bootSession: String
 
   /// Creates a ledger entry.
-  public init(uuid: UUID, runtimeID: UInt32, name: String, kind: DisplayKind, bootTime: Int64) {
+  public init(uuid: UUID, runtimeID: UInt32, name: String, kind: DisplayKind, bootSession: String) {
     self.uuid = uuid
     self.runtimeID = runtimeID
     self.name = name
     self.kind = kind
-    self.bootTime = bootTime
+    self.bootSession = bootSession
   }
 
   /// The entry as an offline, inactive display, used to report outcomes for it.
@@ -90,22 +90,28 @@ struct FileDisabledDisplayLedger: DisabledDisplayLedger {
   }
 }
 
-enum BootTime {
-  /// Reads `kern.boottime` in whole seconds since 1970.
-  static func current() throws -> Int64 {
-    var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
-    var value = timeval()
-    var size = MemoryLayout<timeval>.size
-    guard sysctl(&mib, u_int(mib.count), &value, &size, nil, 0) == 0 else {
-      let code = errno
-      throw DisplayControlError.configurationFailed(
-        "sysctl kern.boottime failed with errno \(code): " + String(cString: strerror(code)))
+enum BootSession {
+  /// Reads `kern.bootsessionuuid`, which changes on every boot and ignores clock changes.
+  static func current() throws -> String {
+    var size = 0
+    guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 0 else {
+      throw failure()
     }
-    return Int64(value.tv_sec)
+    var buffer = [CChar](repeating: 0, count: size)
+    guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 else {
+      throw failure()
+    }
+    let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    let value = String(decoding: bytes, as: UTF8.self)
+    guard !value.isEmpty else {
+      throw DisplayControlError.configurationFailed("sysctl kern.bootsessionuuid returned no value")
+    }
+    return value
   }
 
-  /// Treats boot times within 30 s as the same boot, since `kern.boottime` can shift slightly.
-  static func isSameBoot(_ lhs: Int64, _ rhs: Int64) -> Bool {
-    abs(lhs - rhs) <= 30
+  private static func failure() -> DisplayControlError {
+    let code = errno
+    return .configurationFailed(
+      "sysctl kern.bootsessionuuid failed with errno \(code): " + String(cString: strerror(code)))
   }
 }

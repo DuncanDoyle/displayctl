@@ -652,7 +652,16 @@ Expected: valid JSON. If `plutil` rejects JSON from stdin on the installed versi
 
 - [ ] **Step 4: Run the opt-in hardware matrix with the user present**
 
-Depends on sub-phase 1.1 (D-003, D-004): run the internal `--trial` first, then internal session-scoped steps with the watchdog, then external steps only after a separate opt-in.
+Depends on sub-phase 1.1 (D-003, D-004). Order:
+
+1. Internal `--trial`; it must come back without watchdog help.
+2. Internal session-scoped disconnect/reconnect, with the watchdog armed.
+3. One unattended run: no confirmation, and the watchdog restores a usable screen.
+4. After a separate opt-in: external `--trial`. If it does not come back by itself, external disconnect is recorded as unsupported and steps 5–6 are skipped.
+5. External session-scoped disconnect/reconnect, with the watchdog armed.
+6. Final-display refusal, with one confirmation per setup disconnect.
+
+External disconnect counts as supported on macOS 27 only if recovery from a dropped display is observed.
 
 Run: `Scripts/hardware-test.sh`
 

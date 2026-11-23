@@ -36,9 +36,11 @@ Design changes beyond D-003 without a new decisions.md entry and user approval; 
 
 ### Queue
 - [x] Codex review of the D-003 design amendment + brief — reviews/1.1-design-codex.md, 8 accepted, D-004
-- [ ] Ledger, UUID-first connect, `forget`, `--trial`, with acceptance tests (TDD) ← CURRENT
-- [ ] Hardware-test watchdog and internal-first order
-- [ ] Codex review of c205693..HEAD + triage
+- [x] Ledger, UUID-first connect, `forget`, `--trial`, with acceptance tests (TDD) — d6b1997
+- [x] Hardware-test watchdog and internal-first order — d6b1997
+- [x] Codex review of c205693..d6b1997 + triage — reviews/1.1-codex.md, 10 accepted (2 modified)
+- [x] Fix round for reviews/1.1-codex.md
+- [ ] Codex re-review of the fix round ← CURRENT
 - [ ] Hardware test with the user: internal disconnect/reconnect on macOS 27
 
 ## Program

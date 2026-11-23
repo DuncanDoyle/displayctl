@@ -73,6 +73,12 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     return Self.applyingDDCCapabilities(to: displays, detector: candidateDetector)
   }
 
+  /// The UUID Core Graphics maps `runtimeID` to right now, or nil when it maps none.
+  static func uuid(forRuntimeID runtimeID: UInt32) -> UUID? {
+    guard let rawUUID = CGDisplayCreateUUIDFromDisplayID(runtimeID) else { return nil }
+    return UUID(uuidString: CFUUIDCreateString(nil, rawUUID.takeRetainedValue()) as String)
+  }
+
   static func makeDisplays(
     onlineIDs: [UInt32],
     activeIDs: [UInt32],

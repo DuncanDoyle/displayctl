@@ -3,7 +3,7 @@
 `displayctl` is a Phase 1 command-line tool for inspecting macOS displays, safely
 soft-connecting or soft-disconnecting them, and controlling compatible external
 monitors through hardware DDC/CI brightness commands. It targets an Apple
-Silicon M5 Mac running macOS Tahoe 26.5 and requires Swift 6.2 or newer.
+Silicon M5 Mac running macOS 27 (first built for Tahoe 26.5) and requires Swift 6.2 or newer.
 
 > [!WARNING]
 > Display connection and DDC access use undocumented private macOS APIs. Apple
@@ -46,6 +46,8 @@ displayctl list [--json]
 displayctl connect <selector>
 displayctl connect all
 displayctl disconnect <selector>
+displayctl disconnect <selector> --trial <1...60>
+displayctl forget <uuid|all>
 displayctl brightness get <selector>
 displayctl brightness set <selector> <0...100>
 ```
@@ -93,59 +95,92 @@ Errors are written to standard error. The main exit categories are:
 - `1`: other selection, state, safety, configuration, response, or verification
   failure, including last-active-display refusal.
 
-If testing is interrupted or a display remains soft-disconnected, reconnect all
-physically present displays exposed by macOS:
+### Disabled-display ledger
 
-```sh
-.build/debug/displayctl connect all
-```
+macOS can drop a soft-disabled display from its online display list. `connect` alone could then never find it again. So `displayctl` keeps a ledger of every display it disables, in `~/Library/Application Support/displayctl/` next to the operation lock.
 
-The command reports each attempted recovery independently. If the current shell
-cannot see displays, log out and back in; session-scoped changes revert at that
-boundary. Keep `connect all` available from another terminal during manual
-testing; a remote shell is useful only if it can list the GUI session's displays.
+- `disconnect` records the display's UUID, runtime ID, name and boot session in the ledger before it touches the display. If the ledger cannot be written, the display is left alone and the command fails.
+- `connect <selector>` and `connect all` look up the UUID first. If macOS lists the UUID online, its current runtime ID is used, even if the ID changed.
+- A display macOS no longer lists is enabled by its recorded runtime ID only if the entry is from the current boot and no other display holds that ID. Otherwise it is skipped and reported.
+- An entry is removed once its UUID is verified active again, or by `forget`.
+- `forget <uuid|all>` removes ledger entries without touching any display. Use it for a monitor that is unplugged for good, so `connect all` stops reporting it as a failure.
+
+`disconnect <selector> --trial <seconds>` is a test-only mode. It runs the same safety checks and ledger write, then disables the display with app-only scope instead of session scope. The process exits after at most the given number of seconds, and macOS is expected to undo the change at that moment, even on Ctrl-C or a crash. Check with `list` afterwards that the display is active again. The trial's ledger entry is cleared by the next `connect all`.
+
+### Recovery
+
+If testing is interrupted or a display stays dark, recover in this order:
+
+1. Run `.build/debug/displayctl connect all`, from another terminal if needed. It tries every online inactive display and every ledger entry, and reports each result. It exits nonzero if anything failed, including an unreadable ledger, but it still tries the online displays. Repeat it if another `displayctl` holds the lock.
+2. Check the result with `.build/debug/displayctl list`.
+3. If a display is still missing, log out and log back in. Session-scoped changes revert at logout.
+4. Reboot only if logout and login did not bring it back.
+
+A remote shell helps only if it can list the GUI session's displays. A headless shell may see none.
 
 ## Hardware validation
 
-Run the opt-in test only from an interactive terminal on the target Mac with an
-internal display and HDMI monitor attached:
+Run the opt-in test only from an interactive terminal on the target Mac, with the internal display and one HDMI monitor attached:
 
 ```sh
 Scripts/hardware-test.sh
 ```
 
-The script builds once, prints the initial JSON inventory, accepts only UUIDs
-present in the internal/external inventory groups, and requires exact typed
-confirmation before every brightness or connection mutation. Its exit/signal
-trap attempts `connect all`; it never uses a force override. USB-C recabling and
-logout/login remain manual because automating them would be unsafe or impossible.
+The script builds `displayctl`, prints the initial inventory, and accepts only UUIDs from that inventory. Every brightness change and every disconnect needs its own exact typed confirmation. There is no force option. Logs go to `~/Library/Logs/displayctl-hardware-test/`.
 
-Hardware validation was partially executed in an interactive user session on
-2026-06-30 with the built-in display and a Dell U2720Q attached over HDMI.
-Record observed evidence for every item rather than converting unrun checks into
-successes:
+### Watchdog
 
-- [x] Build completes on the Tahoe 26.5 M5 target.
+Before each disconnect the script starts a detached watchdog. It runs in its own process group, so Ctrl-C, a closed terminal or a killed script do not stop it.
+
+- The watchdog runs every display change itself. The script only sends it requests. So the watchdog knows about each disconnect before it starts, knows when it ends, and can stop it.
+- After each disconnect you must type `YES` within 20 seconds to confirm a usable screen. Without it, or if the script dies, the watchdog fires.
+- When it fires, it stops any running `displayctl` (TERM, then KILL), waits until that process is gone, and only then reads the active displays. It retries `connect all` until the original set is active or a 90-second deadline passes. Every `list` and `connect all` call counts toward that deadline.
+- Firing ends the run. No later disconnect is accepted, and a new disconnect needs a fresh run and a fresh opt-in.
+- The watchdog disarms only after it has verified the original displays are active.
+
+### Test order
+
+1. Brightness get and set on the HDMI monitor.
+2. Internal `--trial`. It passes only if the display comes back by itself. If the watchdog has to step in, the trial fails. Session-scoped steps run only after a pass.
+3. Internal session-scoped disconnect, screen confirmation, then reconnect by UUID.
+4. External opt-in. You type a separate sentence; anything else skips all external steps.
+5. External `--trial`. If the display does not come back by itself, the script reports external disconnect as unsupported on this macOS and skips steps 6 and 7.
+6. External session-scoped disconnect and reconnect by UUID.
+7. Final-display refusal: each other display is disconnected with its own confirmation, then the script checks that disconnecting the internal display is refused.
+
+USB-C recabling and logout/login stay manual.
+
+### Results on macOS 27
+
+Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass. None of these has been run on macOS 27 yet.
+
+- [ ] Build completes on the target.
 - [ ] Automated tests pass on the target.
-- [x] Interactive `list` shows internal and HDMI displays with stable UUIDs.
-- [x] HDMI brightness get succeeds, or unsupported read-back is recorded.
-- [x] HDMI brightness set is visually confirmed on the physical monitor.
-- [ ] The external display disconnects and reconnects.
-  - 2026-06-30 HDMI result: external disconnect returned
-    `postconditionFailed` because the disabled display disappeared from the
-    refreshed inventory. The trap's `connect all` completed but did not restore
-    the HDMI display; unplug/replug did not recover HDMI, and reboot was
-    required. USB-C still worked after the HDMI failure.
-- [ ] The internal display disconnects and reconnects.
+- [ ] Interactive `list` shows internal and HDMI displays with stable UUIDs.
+- [ ] HDMI brightness get succeeds, or unsupported read-back is recorded.
+- [ ] HDMI brightness set is visually confirmed on the physical monitor.
+- [ ] Internal `--trial` reverts by itself.
+- [ ] Internal session disconnect and reconnect, with the watchdog armed.
+- [ ] One unattended watchdog timeout restores a usable screen.
+- [ ] External `--trial` reverts by itself, or external disconnect is recorded as unsupported.
+- [ ] External disconnect and reconnect. Claim support only if recovery of a display that macOS dropped from the online list was observed; otherwise record it as unsupported (D-004).
 - [ ] Disconnecting the final active display is refused with a nonzero exit.
-- [ ] USB-C DDC is manually tested after recabling and its result is recorded.
+- [ ] USB-C DDC is tested after recabling and the result is recorded.
 - [ ] Logout/login restores session-scoped connection state.
-- [ ] Manual `displayctl connect all` recovery restores available displays.
+- [ ] Manual `displayctl connect all` restores available displays.
 
-After the scripted checks, manually reconnect the monitor over USB-C, run `list`,
-then try `brightness get` and a carefully confirmed `brightness set`; record
-supported or unsupported without expecting a fallback. Finally, test logout/login
-recovery and run `connect all` once manually.
+After the scripted steps, reconnect the monitor over USB-C, run `list`, then `brightness get` and a carefully confirmed `brightness set`. Record supported or unsupported; there is no fallback. Then test logout/login and run `connect all` once by hand.
+
+### History: macOS 26.5, 2026-06-30
+
+A partial run on macOS Tahoe 26.5, with the built-in display and a Dell U2720Q over HDMI. It is not evidence for macOS 27.
+
+- [x] Build completed on the M5 target.
+- [x] Interactive `list` showed internal and HDMI displays with stable UUIDs.
+- [x] HDMI brightness get succeeded.
+- [x] HDMI brightness set was visually confirmed.
+- [ ] External disconnect and reconnect: `disconnect` returned `postconditionFailed` because the disabled display disappeared from the inventory. The exit trap's `connect all` did not restore it, and neither did unplugging and replugging HDMI. Only a reboot did. USB-C still worked afterwards.
+- Not run: internal disconnect, final-display refusal, USB-C DDC, logout/login, manual `connect all`.
 
 ## Roadmap
 

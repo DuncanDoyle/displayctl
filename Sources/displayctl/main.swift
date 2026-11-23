@@ -76,29 +76,51 @@ protocol CLIService: Sendable {
   func connect(_ selector: String) async throws -> Display
   func connectAll() async throws -> [DisplayConnectionOutcome]
   func disconnect(_ selector: String) async throws -> Display
-  func disconnectTrial(_ selector: String) async throws -> Display
+  func disconnectTrial(_ selector: String) async throws -> TrialDisconnect
   func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry]
   func disabledDisplays() async throws -> [DisabledDisplayEntry]
   func brightnessGet(_ selector: String) async throws -> (Display, DDCValue)
   func brightnessSet(_ selector: String, percent: Int) async throws -> Display
 }
+/// A verified trial disable and when macOS committed it.
+struct TrialDisconnect: Sendable {
+  let display: Display
+  let committedAt: ContinuousClock.Instant
+}
+/// Hardware that notes when its last disable was committed.
+final class DisableCommitRecorder: DisplayConnectionHardware, @unchecked Sendable {
+  private let base: any DisplayConnectionHardware
+  private let lock = NSLock()
+  private var committedAt: ContinuousClock.Instant?
+  init(_ base: any DisplayConnectionHardware) { self.base = base }
+  func setEnabled(_ displayID: UInt32, enabled: Bool) throws {
+    try base.setEnabled(displayID, enabled: enabled)
+    if !enabled { lock.withLock { committedAt = .now } }
+  }
+  var lastDisableCommit: ContinuousClock.Instant? { lock.withLock { committedAt } }
+}
 struct LiveCLIService: CLIService {
-  private let inventory: DisplayInventory
+  private let inventory: any DisplaySnapshotProviding
   private let connection: ConnectionController
   private let trialConnection: ConnectionController
+  private let trialHardware: DisableCommitRecorder
   private let brightness: DDCBrightnessController
-  init() {
-    let inventory = DisplayInventory()
+  init(
+    inventory: any DisplaySnapshotProviding = DisplayInventory(),
+    transaction: CoreGraphicsDisplayTransactionFunctions = .live(),
+    stateDirectory: URL = DisplayControlState.defaultDirectory
+  ) {
     self.inventory = inventory
     connection = ConnectionController(
-      snapshot: inventory, hardware: Self.hardware(trial: false))
+      snapshot: inventory,
+      hardware: CoreGraphicsDisplayConnectionHardware(api: transaction, scope: .session),
+      stateDirectory: stateDirectory)
+    // Trial disconnects complete with the app-only scope so macOS reverts them at process exit.
+    trialHardware = DisableCommitRecorder(
+      CoreGraphicsDisplayConnectionHardware(api: transaction, scope: .appOnly))
     trialConnection = ConnectionController(
-      snapshot: inventory, hardware: Self.hardware(trial: true))
+      snapshot: inventory, hardware: trialHardware, stateDirectory: stateDirectory)
     brightness = DDCBrightnessController()
-  }
-  /// Trial disconnects complete with the app-only scope so macOS reverts them at process exit.
-  static func hardware(trial: Bool) -> CoreGraphicsDisplayConnectionHardware {
-    CoreGraphicsDisplayConnectionHardware(scope: trial ? .appOnly : .session)
   }
   func list() async throws -> [Display] { try inventory.snapshot() }
   func connect(_ selector: String) async throws -> Display { try connection.connect(selector) }
@@ -106,8 +128,9 @@ struct LiveCLIService: CLIService {
   func disconnect(_ selector: String) async throws -> Display {
     try connection.disconnect(selector)
   }
-  func disconnectTrial(_ selector: String) async throws -> Display {
-    try trialConnection.disconnect(selector)
+  func disconnectTrial(_ selector: String) async throws -> TrialDisconnect {
+    let display = try trialConnection.disconnect(selector)
+    return TrialDisconnect(display: display, committedAt: trialHardware.lastDisableCommit ?? .now)
   }
   func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry] {
     guard let uuid else { return try connection.forgetAll() }
@@ -130,8 +153,8 @@ struct CLIResult: Equatable, Sendable {
   var stdout = ""
   var stderr = ""
   var exitCode: Int32 = 0
-  /// Seconds to keep the process alive after printing, for trial disconnects.
-  var holdSeconds = 0
+  /// When a trial disconnect's process may exit, which reverts the disable.
+  var holdUntil: ContinuousClock.Instant?
 }
 struct CLIApplication: Sendable {
   static let help = """
@@ -181,8 +204,10 @@ struct CLIApplication: Sendable {
       case .connectAll:
         return try await connectAll()
       case .disconnectTrial(let selector, let seconds):
-        let display = try await service.disconnectTrial(selector)
-        return CLIResult(stdout: mutation("disconnected", display), holdSeconds: seconds)
+        let trial = try await service.disconnectTrial(selector)
+        return CLIResult(
+          stdout: mutation("disconnected", trial.display),
+          holdUntil: trial.committedAt + .seconds(seconds))
       case .forget(let uuid):
         return CLIResult(stdout: forgotten(try await service.forget(uuid)))
       case .forgetAll:
@@ -207,7 +232,8 @@ struct CLIApplication: Sendable {
       case .success(let connected):
         result.stdout += "connected \(identity(connected)) active=\(connected.isActive)\n"
       case .failure(let error):
-        result.stderr += "\(identity(outcome.display)): \(Self.describe(error))\n"
+        let subject = outcome.display.map(identity) ?? "ledger"
+        result.stderr += "\(subject): \(Self.describe(error))\n"
         result.exitCode = max(result.exitCode, Self.exitCode(for: error))
       }
     }
@@ -288,5 +314,7 @@ let cliResult = await CLIApplication.run(
 if !cliResult.stdout.isEmpty { FileHandle.standardOutput.write(Data(cliResult.stdout.utf8)) }
 if !cliResult.stderr.isEmpty { FileHandle.standardError.write(Data(cliResult.stderr.utf8)) }
 // A trial disable lasts only while this process runs; exiting reverts it.
-if cliResult.holdSeconds > 0 { sleep(UInt32(cliResult.holdSeconds)) }
+if let holdUntil = cliResult.holdUntil {
+  try? await Task.sleep(until: holdUntil, clock: .continuous)
+}
 exit(cliResult.exitCode)

@@ -1,3 +1,4 @@
+import CoreGraphics
 import DisplayControlCore
 import Foundation
 import XCTest
@@ -111,6 +112,7 @@ final class CLIParserTests: XCTestCase {
     let outcomes = [
       DisplayConnectionOutcome(display: candidate, result: .success(connected)),
       DisplayConnectionOutcome(display: failed, result: .failure(.configurationFailed("boom"))),
+      DisplayConnectionOutcome(display: nil, result: .failure(.configurationFailed("unreadable"))),
     ]
     let result = await CLIApplication(service: StubService(outcomes: outcomes)).execute(.connectAll)
     XCTAssertEqual(
@@ -119,6 +121,7 @@ final class CLIParserTests: XCTestCase {
     XCTAssertEqual(
       result.stderr,
       "uuid=\(failed.uuid.uuidString) runtimeID=11 name=Failed: Display configuration failed: boom\n"
+        + "ledger: Display configuration failed: unreadable\n"
     )
     XCTAssertEqual(result.exitCode, 1)
   }
@@ -169,10 +172,10 @@ final class CLIParserTests: XCTestCase {
       XCTAssertEqual(result.exitCode, 64, "\(arguments)")
     }
   }
-  func testTrialDisconnectUsesAppOnlyHardwareAndHoldsProcess() async {
-    XCTAssertEqual(LiveCLIService.hardware(trial: true).scope, .appOnly)
-    XCTAssertEqual(LiveCLIService.hardware(trial: false).scope, .session)
-    let service = StubService(displays: [display(active: false)])
+  func testTrialHoldRunsFromTheDisableCommit() async {
+    // The disable was committed 3 s before verification and output finished.
+    let committedAt = ContinuousClock.now - .seconds(3)
+    let service = StubService(displays: [display(active: false)], trialCommit: committedAt)
     let result = await CLIApplication(service: service).execute(
       .disconnectTrial(selector: "42", seconds: 5))
     XCTAssertEqual(
@@ -180,16 +183,36 @@ final class CLIParserTests: XCTestCase {
       CLIResult(
         stdout:
           "disconnected uuid=\(uuid.uuidString) runtimeID=42 name=Desk Display active=false\n",
-        holdSeconds: 5))
+        holdUntil: committedAt + .seconds(5)))
     let calls = await service.calls
     XCTAssertEqual(calls, ["trial:42"])
     let help = await CLIApplication(service: service).execute(.help)
     XCTAssertTrue(help.stdout.contains("displayctl disconnect <selector> [--trial <1...60>]"))
     XCTAssertTrue(help.stdout.contains("displayctl forget <uuid|all>"))
   }
+  // Acceptance test 9 (live wiring).
+  func testLiveTrialCompletesAppOnlyAndRecordsCommitBeforeVerification() async throws {
+    let screens = FakeScreens([
+      display(uuid: UUID(), id: 1), display(uuid: UUID(), id: 2), display(uuid: UUID(), id: 3),
+    ])
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("displayctl-tests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let service = LiveCLIService(
+      inventory: screens, transaction: screens.transaction, stateDirectory: directory)
+
+    let trial = try await service.disconnectTrial("1")
+    XCTAssertEqual(screens.completeOptions, [.forAppOnly])
+    XCTAssertFalse(trial.display.isActive)
+    // The refresh that verifies the disable runs after the commit.
+    XCTAssertLessThanOrEqual(trial.committedAt, try XCTUnwrap(screens.lastSnapshotAt))
+
+    _ = try await service.disconnect("2")
+    XCTAssertEqual(screens.completeOptions, [.forAppOnly, .forSession])
+  }
   func testForgetReportsRemovedEntries() async {
     let entry = DisabledDisplayEntry(
-      uuid: uuid, runtimeID: 3, name: "Dell", kind: .external, bootTime: 1)
+      uuid: uuid, runtimeID: 3, name: "Dell", kind: .external, bootSession: "boot")
     let service = StubService(entries: [entry])
     let app = CLIApplication(service: service)
     let one = await app.execute(.forget(uuid: uuid))
@@ -203,9 +226,9 @@ final class CLIParserTests: XCTestCase {
   func testListNotesLedgerDisplaysThatAreNotOnline() async {
     let hidden = DisabledDisplayEntry(
       uuid: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!, runtimeID: 3,
-      name: "Dell", kind: .external, bootTime: 1)
+      name: "Dell", kind: .external, bootSession: "boot")
     let online = DisabledDisplayEntry(
-      uuid: uuid, runtimeID: 42, name: "Desk Display", kind: .external, bootTime: 1)
+      uuid: uuid, runtimeID: 42, name: "Desk Display", kind: .external, bootSession: "boot")
     let app = CLIApplication(
       service: StubService(displays: [display()], entries: [hidden, online]))
     let result = await app.execute(.list(json: false))
@@ -216,24 +239,66 @@ final class CLIParserTests: XCTestCase {
     XCTAssertEqual(result.exitCode, 0)
   }
 }
+/// Displays whose active state follows the injected Core Graphics transaction calls.
+private final class FakeScreens: DisplaySnapshotProviding, @unchecked Sendable {
+  private let lock = NSLock()
+  private var displays: [Display]
+  private var options: [CGConfigureOption] = []
+  private var snapshotAt: ContinuousClock.Instant?
+  init(_ displays: [Display]) { self.displays = displays }
+  var completeOptions: [CGConfigureOption] { lock.withLock { options } }
+  var lastSnapshotAt: ContinuousClock.Instant? { lock.withLock { snapshotAt } }
+  func snapshot() throws -> [Display] {
+    lock.withLock {
+      snapshotAt = .now
+      return displays
+    }
+  }
+  var transaction: CoreGraphicsDisplayTransactionFunctions {
+    CoreGraphicsDisplayTransactionFunctions(
+      begin: { config in
+        config.pointee = CGDisplayConfigRef(bitPattern: 0x1234)
+        return .success
+      },
+      enable: { _, id, enabled in
+        self.lock.withLock {
+          self.displays = self.displays.map {
+            guard $0.runtimeID == id else { return $0 }
+            return Display(
+              uuid: $0.uuid, runtimeID: id, name: $0.name, kind: $0.kind, isOnline: true,
+              isActive: enabled, isMain: false, ddcCapability: $0.ddcCapability)
+          }
+        }
+        return .success
+      },
+      complete: { _, option in
+        self.lock.withLock { self.options.append(option) }
+        return .success
+      },
+      cancel: { _ in .success })
+  }
+}
 private actor StubService: CLIService {
   let displays: [Display]
   let outcomes: [DisplayConnectionOutcome]
   let error: DisplayControlError?
   let entries: [DisabledDisplayEntry]
+  let trialCommit: ContinuousClock.Instant
   var calls: [String] = []
   init(
     displays: [Display] = [], outcomes: [DisplayConnectionOutcome] = [],
-    error: DisplayControlError? = nil, entries: [DisabledDisplayEntry] = []
+    error: DisplayControlError? = nil, entries: [DisabledDisplayEntry] = [],
+    trialCommit: ContinuousClock.Instant = .now
   ) {
     self.displays = displays
     self.outcomes = outcomes
     self.error = error
     self.entries = entries
+    self.trialCommit = trialCommit
   }
-  func disconnectTrial(_ selector: String) async throws -> Display {
+  func disconnectTrial(_ selector: String) async throws -> TrialDisconnect {
     calls.append("trial:\(selector)")
-    return try checked(displays.last)
+    return TrialDisconnect(display: try checked(displays.last), committedAt: trialCommit)
   }
   func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry] {
     calls.append("forget:\(uuid?.uuidString ?? "all")")

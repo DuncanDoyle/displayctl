@@ -7,10 +7,11 @@ public protocol DisplayConnectionHardware: Sendable {
 }
 
 public struct DisplayConnectionOutcome: Sendable {
-  public let display: Display
+  /// The candidate display, or nil for the outcome of reading the ledger itself.
+  public let display: Display?
   public let result: Result<Display, DisplayControlError>
 
-  public init(display: Display, result: Result<Display, DisplayControlError>) {
+  public init(display: Display?, result: Result<Display, DisplayControlError>) {
     self.display = display
     self.result = result
   }
@@ -91,7 +92,8 @@ public struct ConnectionController: Sendable {
   private let hardware: any DisplayConnectionHardware
   private let operationLock: any DisplayOperationLocking
   private let ledger: any DisabledDisplayLedger
-  private let bootTime: @Sendable () throws -> Int64
+  private let bootSession: @Sendable () throws -> String
+  private let runtimeIDOwner: @Sendable (UInt32) -> UUID?
 
   /// Creates a controller whose ledger and operation lock live in `stateDirectory`.
   public init(
@@ -104,22 +106,26 @@ public struct ConnectionController: Sendable {
       hardware: hardware,
       lock: DarwinDisplayOperationLock(lockURL: DisplayControlState.lockURL(in: stateDirectory)),
       ledger: FileDisabledDisplayLedger(url: DisplayControlState.ledgerURL(in: stateDirectory)),
-      bootTime: BootTime.current
+      bootSession: BootSession.current,
+      runtimeIDOwner: DisplayInventory.uuid(forRuntimeID:)
     )
   }
 
+  /// `runtimeIDOwner` names the UUID Core Graphics maps a runtime ID to right now, if any.
   init(
     snapshot: any DisplaySnapshotProviding,
     hardware: any DisplayConnectionHardware,
     lock: any DisplayOperationLocking,
     ledger: any DisabledDisplayLedger,
-    bootTime: @escaping @Sendable () throws -> Int64
+    bootSession: @escaping @Sendable () throws -> String,
+    runtimeIDOwner: @escaping @Sendable (UInt32) -> UUID?
   ) {
     self.snapshot = snapshot
     self.hardware = hardware
     operationLock = lock
     self.ledger = ledger
-    self.bootTime = bootTime
+    self.bootSession = bootSession
+    self.runtimeIDOwner = runtimeIDOwner
   }
 
   /// Returns the ledger's entries without taking the operation lock.
@@ -130,7 +136,13 @@ public struct ConnectionController: Sendable {
   /// Removes the ledger entry for `uuid` without touching any display.
   public func forget(_ uuid: UUID) throws -> DisabledDisplayEntry {
     try operationLock.withLock {
-      let entries = try ledger.load()
+      let entries: [DisabledDisplayEntry]
+      do {
+        entries = try ledger.load()
+      } catch {
+        throw DisplayControlError.configurationFailed(
+          "\(Self.message(error)); use forget all to reset the ledger")
+      }
       guard let entry = entries.first(where: { $0.uuid == uuid }) else {
         throw DisplayControlError.displayNotFound(uuid.uuidString)
       }
@@ -139,15 +151,19 @@ public struct ConnectionController: Sendable {
     }
   }
 
-  /// Removes every ledger entry without touching any display.
+  /// Replaces the ledger with an empty one without touching any display, even when it is
+  /// unreadable; returns the entries it could still read.
   public func forgetAll() throws -> [DisabledDisplayEntry] {
     try operationLock.withLock {
-      let entries = try ledger.load()
-      if !entries.isEmpty {
-        try ledger.save([])
-      }
+      let entries = (try? ledger.load()) ?? []
+      try ledger.save([])
       return entries
     }
+  }
+
+  private static func message(_ error: Error) -> String {
+    if case .configurationFailed(let message) = error as? DisplayControlError { return message }
+    return String(describing: error)
   }
 
   /// Enables an online inactive display, or a ledger display that macOS no longer lists when the
@@ -175,10 +191,17 @@ public struct ConnectionController: Sendable {
     }
   }
 
-  /// Attempts every online inactive display and every ledger entry once, in that order.
+  /// Attempts every online inactive display and every ledger entry once, in that order. An
+  /// unreadable ledger is reported as a last failed outcome; online displays are still attempted.
   public func connectAll() throws -> [DisplayConnectionOutcome] {
     try operationLock.withLock {
-      let entries = try ledger.load()
+      var ledgerFailure: DisplayControlError?
+      var entries: [DisabledDisplayEntry] = []
+      do {
+        entries = try ledger.load()
+      } catch {
+        ledgerFailure = error as? DisplayControlError ?? .configurationFailed("\(error)")
+      }
       var candidates = try snapshot.snapshot()
         .filter { $0.isOnline && !$0.isActive }
         .map { display in (display, entries.first { $0.uuid == display.uuid }) }
@@ -187,7 +210,7 @@ public struct ConnectionController: Sendable {
         ($0.placeholder, $0)
       }
 
-      return candidates.map { display, entry in
+      let outcomes = candidates.map { display, entry in
         let result: Result<Display, DisplayControlError>
         do {
           result = .success(try reconnect(display.uuid, entry: entry, acceptAlreadyActive: true))
@@ -198,6 +221,8 @@ public struct ConnectionController: Sendable {
         }
         return DisplayConnectionOutcome(display: display, result: result)
       }
+      guard let ledgerFailure else { return outcomes }
+      return outcomes + [DisplayConnectionOutcome(display: nil, result: .failure(ledgerFailure))]
     }
   }
 
@@ -214,7 +239,7 @@ public struct ConnectionController: Sendable {
       }
       let entry = DisabledDisplayEntry(
         uuid: display.uuid, runtimeID: display.runtimeID, name: display.name, kind: display.kind,
-        bootTime: try bootTime())
+        bootSession: try bootSession())
       try ledger.save(try ledger.load().filter { $0.uuid != display.uuid } + [entry])
       return try transition(display, enabled: false)
     }
@@ -243,12 +268,13 @@ public struct ConnectionController: Sendable {
         result = try transition(online, enabled: true)
       }
     } else if let entry {
-      guard BootTime.isSameBoot(entry.bootTime, try bootTime()) else {
+      guard entry.bootSession == (try bootSession()) else {
         throw DisplayControlError.recoverySkipped(
           "Display \(uuid.uuidString) was disabled in an earlier boot; its recorded runtime ID "
             + "\(entry.runtimeID) is not trusted")
       }
       try requireRuntimeIDUnclaimed(entry.runtimeID, by: uuid, in: displays)
+      try requireRuntimeIDNotMappedElsewhere(entry.runtimeID, by: uuid)
       result = try transition(entry.placeholder, enabled: true)
     } else {
       throw DisplayControlError.displayNotFound(uuid.uuidString)
@@ -266,6 +292,16 @@ public struct ConnectionController: Sendable {
       throw DisplayControlError.recoverySkipped(
         "Display \(uuid.uuidString) is offline and its recorded runtime ID \(runtimeID) is now "
           + "held by display \(holder.uuid.uuidString)")
+    }
+  }
+
+  /// Skips an offline enable when Core Graphics maps the saved ID to another UUID right now.
+  /// The short window between this check and the enable, under our lock, is accepted.
+  private func requireRuntimeIDNotMappedElsewhere(_ runtimeID: UInt32, by uuid: UUID) throws {
+    if let owner = runtimeIDOwner(runtimeID), owner != uuid {
+      throw DisplayControlError.recoverySkipped(
+        "Display \(uuid.uuidString) is offline and Core Graphics maps its recorded runtime ID "
+          + "\(runtimeID) to display \(owner.uuidString)")
     }
   }
 
@@ -340,6 +376,7 @@ public struct ConnectionController: Sendable {
         target = online
       } else {
         try requireRuntimeIDUnclaimed(display.runtimeID, by: display.uuid, in: displays)
+        try requireRuntimeIDNotMappedElsewhere(display.runtimeID, by: display.uuid)
         target = display
       }
 
@@ -360,11 +397,27 @@ public struct ConnectionController: Sendable {
   }
 }
 
-struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
+/// The Core Graphics calls one display configuration transaction makes; tests inject fakes.
+public struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
   let begin: (UnsafeMutablePointer<CGDisplayConfigRef?>) -> CGError
   let enable: (CGDisplayConfigRef?, CGDirectDisplayID, Bool) throws -> CGError
   let complete: (CGDisplayConfigRef?, CGConfigureOption) -> CGError
   let cancel: (CGDisplayConfigRef?) -> CGError
+
+  public init(
+    begin: @escaping (UnsafeMutablePointer<CGDisplayConfigRef?>) -> CGError,
+    enable: @escaping (CGDisplayConfigRef?, CGDirectDisplayID, Bool) throws -> CGError,
+    complete: @escaping (CGDisplayConfigRef?, CGConfigureOption) -> CGError,
+    cancel: @escaping (CGDisplayConfigRef?) -> CGError
+  ) {
+    self.begin = begin
+    self.enable = enable
+    self.complete = complete
+    self.cancel = cancel
+  }
+
+  /// The real Core Graphics calls, with `CGSConfigureDisplayEnabled` from the private bridge.
+  public static func live() -> Self { live(bridge: PrivateAPIBridge()) }
 
   static func live(bridge: PrivateAPIBridge) -> Self {
     Self(
@@ -397,7 +450,10 @@ public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
     self.scope = scope
   }
 
-  init(api: CoreGraphicsDisplayTransactionFunctions, scope: DisplayConfigurationScope = .session) {
+  /// Creates hardware that runs its transactions through `api`.
+  public init(
+    api: CoreGraphicsDisplayTransactionFunctions, scope: DisplayConfigurationScope = .session
+  ) {
     self.api = api
     self.scope = scope
   }

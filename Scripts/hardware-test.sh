@@ -7,32 +7,64 @@ REPO_ROOT="$(dirname "$(dirname "$SCRIPT_PATH")")"
 
 # Timeouts in whole seconds; override via env to test with a stub displayctl.
 CONFIRM_TIMEOUT="${HARDWARE_TEST_CONFIRM_TIMEOUT:-20}"
-ARMED_MAX="${HARDWARE_TEST_ARMED_MAX:-180}"
+ARMED_MAX="${HARDWARE_TEST_ARMED_MAX:-300}"
 RESTORE_DEADLINE="${HARDWARE_TEST_RESTORE_DEADLINE:-90}"
 RETRY_INTERVAL="${HARDWARE_TEST_RETRY_INTERVAL:-2}"
 PROMPT_TIMEOUT="${HARDWARE_TEST_PROMPT_TIMEOUT:-60}"
 CMD_TIMEOUT="${HARDWARE_TEST_CMD_TIMEOUT:-60}"
 TRIAL_SECONDS="${HARDWARE_TEST_TRIAL_SECONDS:-10}"
 TRIAL_SETTLE="${HARDWARE_TEST_TRIAL_SETTLE:-5}"
+TRIAL_MARGIN="${HARDWARE_TEST_TRIAL_MARGIN:-10}"
+DISARM_SETTLE="${HARDWARE_TEST_DISARM_SETTLE:-5}"
+KILL_GRACE="${HARDWARE_TEST_KILL_GRACE:-3}"
+KILL_WAIT="${HARDWARE_TEST_KILL_WAIT:-2}"
 export HARDWARE_TEST_CONFIRM_TIMEOUT="$CONFIRM_TIMEOUT" HARDWARE_TEST_ARMED_MAX="$ARMED_MAX" \
   HARDWARE_TEST_RESTORE_DEADLINE="$RESTORE_DEADLINE" HARDWARE_TEST_RETRY_INTERVAL="$RETRY_INTERVAL" \
-  HARDWARE_TEST_CMD_TIMEOUT="$CMD_TIMEOUT"
+  HARDWARE_TEST_CMD_TIMEOUT="$CMD_TIMEOUT" HARDWARE_TEST_DISARM_SETTLE="$DISARM_SETTLE" \
+  HARDWARE_TEST_KILL_GRACE="$KILL_GRACE" HARDWARE_TEST_KILL_WAIT="$KILL_WAIT"
+# Longest time stopping one process can take.
+ESCALATION=$(( KILL_GRACE + KILL_WAIT ))
+# When set, restore_loop touches this file before each `connect all`.
+INTERVENED_MARK=""
 
 log() {
   printf '%s %s\n' "$(date '+%H:%M:%S')" "$*"
 }
 
-# Runs a command with stdin closed and kills it after $1 seconds (exit 124).
+now() {
+  date +%s
+}
+
+min() {
+  if (( $1 < $2 )); then echo "$1"; else echo "$2"; fi
+}
+
+# Sends TERM, then KILL after KILL_GRACE seconds; fails if the process outlives KILL_WAIT more.
+stop_pid() {
+  local pid="$1" i
+  kill -TERM "$pid" 2>/dev/null || return 0
+  for (( i = 0; i < KILL_GRACE * 5; i++ )); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  kill -KILL "$pid" 2>/dev/null || return 0
+  for (( i = 0; i < KILL_WAIT * 5; i++ )); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# Runs a command with stdin closed and stops it after $1 seconds (exit 124).
 run_bounded() {
   local limit_ticks=$(( $1 * 5 )) ticks=0 pid
   shift
+  (( limit_ticks > 0 )) || return 124
   "$@" </dev/null &
   pid=$!
-  [[ -n "${RECORD_PID:-}" ]] && printf '%s\n' "$pid" > "$RECORD_PID"
   while kill -0 "$pid" 2>/dev/null; do
     if (( ticks >= limit_ticks )); then
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      if stop_pid "$pid"; then wait "$pid" 2>/dev/null || true; fi
       return 124
     fi
     sleep 0.2
@@ -41,96 +73,183 @@ run_bounded() {
   wait "$pid"
 }
 
+# Prints the sorted active UUIDs; `list` is stopped after $1 seconds.
 active_uuids() {
   local json
-  json="$(run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" list --json)" || return 1
+  json="$(run_bounded "$1" "$DISPLAYCTL" list --json)" || return 1
   printf '%s\n' "$json" | jq -r 'if type == "array" then .[] | select(.isActive) | .uuid else error("not an array") end' \
     | sort
 }
 
-# Succeeds when every UUID listed in file $1 is currently active.
+# Succeeds when every UUID listed in file $1 is active; `list` is stopped after $2 seconds.
 originals_active() {
   local current uuid
-  current="$(active_uuids)" || return 1
+  current="$(active_uuids "$2")" || return 1
   while IFS= read -r uuid; do
     [[ -z "$uuid" ]] && continue
     printf '%s\n' "$current" | grep -Fqx -- "$uuid" || return 1
   done < "$1"
 }
 
-# Retries `connect all` until the UUIDs in $1 are active, a cancel file $3 appears, or $2 seconds pass.
-# A live pid in file $4 is a displayctl mutation still running; the set counts as restored only after it exits.
+# Retries `connect all` until the UUIDs in $1 are active or $2 seconds pass, every call included.
+# A live worker pid $3 blocks success: the active set is only read once that worker is gone.
 restore_loop() {
-  local originals="$1" deadline=$(( SECONDS + $2 )) cancel_file="${3:-}" mutator_file="${4:-}"
-  local attempt=0 restored output rc
+  local originals="$1" end=$(( $(now) + $2 )) worker="${3:-}" attempt=0 remaining output rc
   while true; do
-    restored=0
-    originals_active "$originals" && restored=1
-    if (( restored )) && ! { [[ -s "$mutator_file" ]] && kill -0 "$(cat "$mutator_file")" 2>/dev/null; }; then
-      log "Restored: every originally active display is active."
-      return 0
-    fi
-    if [[ -n "$cancel_file" && -e "$cancel_file" ]]; then
-      log "Cancelled by the test script."
-      return 0
-    fi
-    if (( SECONDS >= deadline )); then
+    remaining=$(( end - $(now) - ESCALATION ))
+    if (( remaining < 1 )); then
       log "Hard deadline reached; originally active displays are not all active."
       return 1
     fi
-    if (( restored )); then
-      log "Displays are active, but a displayctl mutation is still running; waiting for it to exit."
+    if [[ -n "$worker" ]] && kill -0 "$worker" 2>/dev/null; then
+      log "displayctl worker $worker is still running; the active set is not read until it is gone."
+    elif originals_active "$originals" "$(min "$CMD_TIMEOUT" "$remaining")"; then
+      log "Restored: every originally active display is active."
+      return 0
     else
-      attempt=$(( attempt + 1 ))
-      rc=0
-      output="$(run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" connect all 2>&1)" || rc=$?
-      log "connect all attempt $attempt exited $rc: $(printf '%s' "$output" | tr '\n' ' ')"
+      remaining=$(( end - $(now) - ESCALATION ))
+      if (( remaining >= 1 )); then
+        attempt=$(( attempt + 1 ))
+        if [[ -n "$INTERVENED_MARK" ]]; then : > "$INTERVENED_MARK"; fi
+        rc=0
+        output="$(run_bounded "$(min "$CMD_TIMEOUT" "$remaining")" "$DISPLAYCTL" connect all 2>&1)" || rc=$?
+        log "connect all attempt $attempt exited $rc: $(printf '%s' "$output" | tr '\n' ' ')"
+      fi
     fi
-    sleep "$RETRY_INTERVAL"
+    remaining=$(( end - $(now) ))
+    if (( remaining > 0 )); then sleep "$(min "$RETRY_INTERVAL" "$remaining")"; fi
   done
 }
 
-# Detached watchdog: $1 state dir, $2 seconds to wait for confirmation before restoring.
+# ---- Watchdog: a detached supervisor that runs every display mutation as its own child. ----
+
+wd_write() { # $1 file name, $2 content; atomic for readers in the other process.
+  printf '%s\n' "$2" > "$WD_STATE/$1.tmp" && mv -f "$WD_STATE/$1.tmp" "$WD_STATE/$1"
+}
+
+# Starts request $1 as a worker; a disconnect is refused once any watchdog of this run has fired.
+wd_start() {
+  local seq="$1" line args=()
+  {
+    IFS= read -r WORKER_TIMEOUT
+    while IFS= read -r line; do args+=("$line"); done
+  } < "$WD_STATE/req.$seq"
+  if [[ "${args[0]}" == "disconnect" ]]; then
+    if [[ -e "$RUN_FIRED" ]]; then
+      wd_write "res.$seq" refused
+      log "Request $seq refused: a watchdog of this run has fired."
+      return 0
+    fi
+    # Each disconnect needs a fresh confirmation.
+    rm -f "$WD_STATE/confirmed"
+    wd_write confirm_by $(( $(now) + FIRE_AFTER ))
+  fi
+  "$DISPLAYCTL" "${args[@]}" < /dev/null > "$WD_STATE/out.$seq" 2>&1 &
+  WORKER=$!
+  WORKER_SEQ="$seq"
+  WORKER_DEADLINE=$(( $(now) + WORKER_TIMEOUT ))
+  log "Request $seq: started displayctl ${args[*]} as pid $WORKER, limit ${WORKER_TIMEOUT}s."
+}
+
+# Verifies the original active set for a disarm, with no worker running.
+wd_verify() {
+  local end=$(( $(now) + DISARM_SETTLE ))
+  while true; do
+    originals_active "$WD_STATE/originals" "$CMD_TIMEOUT" && return 0
+    (( $(now) >= end )) && return 1
+    sleep 1
+  done
+}
+
+# $1 state dir, $2 test script pid, $3 seconds allowed after each disconnect starts.
 watchdog_main() {
-  local dir="$1" fire_after="$2" start=$SECONDS reason
+  local fg_pid="$2" armed_at seq=0 reason rc
+  WD_STATE="$1"
+  FIRE_AFTER="$3"
+  RUN_FIRED="$(dirname "$WD_STATE")/fired"
+  INTERVENED_MARK="$WD_STATE/intervened"
+  WORKER=""
   set +e
   trap '' HUP INT
-  printf '%s\n' "$$" > "$dir/pid"
-  log "Armed (pid $$): confirm within ${fire_after}s, restore by ${ARMED_MAX}s at the latest."
-  : > "$dir/ready"
+  armed_at=$(now)
+  wd_write confirm_by $(( armed_at + FIRE_AFTER ))
+  wd_write pid "$$"
+  log "Armed (pid $$, test script $fg_pid): fires ${FIRE_AFTER}s after a disconnect starts unless confirmed; disarm within ${ARMED_MAX}s."
+  : > "$WD_STATE/ready"
   while true; do
-    if [[ -e "$dir/cancel" ]]; then
-      log "Disarmed by the test script."
-      exit 0
+    if [[ -n "$WORKER" ]] && ! kill -0 "$WORKER" 2>/dev/null; then
+      wait "$WORKER"
+      rc=$?
+      wd_write "res.$WORKER_SEQ" "$rc"
+      log "Request $WORKER_SEQ: exited $rc."
+      WORKER=""
     fi
-    if [[ -e "$dir/fire" ]]; then
+    if [[ -e "$WD_STATE/fire" ]]; then
       reason="the test script requested recovery"
       break
     fi
-    if [[ ! -e "$dir/confirmed" ]] && (( SECONDS - start >= fire_after )); then
-      reason="no confirmation within ${fire_after}s"
+    if ! kill -0 "$fg_pid" 2>/dev/null; then
+      reason="the test script is gone"
       break
     fi
-    if (( SECONDS - start >= ARMED_MAX )); then
+    if [[ -n "$WORKER" ]] && (( $(now) >= WORKER_DEADLINE )); then
+      reason="request $WORKER_SEQ ran past its ${WORKER_TIMEOUT}s limit"
+      break
+    fi
+    if [[ -z "$WORKER" && -e "$WD_STATE/disarm" ]]; then
+      if wd_verify; then
+        : > "$WD_STATE/disarmed"
+        log "Disarmed: every originally active display is verified active."
+        exit 0
+      fi
+      reason="the original displays were not all active at disarm"
+      break
+    fi
+    if [[ ! -e "$WD_STATE/confirmed" ]] && (( $(now) >= $(cat "$WD_STATE/confirm_by") )); then
+      reason="no confirmation in time"
+      break
+    fi
+    if (( $(now) - armed_at >= ARMED_MAX )); then
       reason="still armed after ${ARMED_MAX}s"
       break
     fi
-    sleep 1
+    if [[ -z "$WORKER" && -e "$WD_STATE/req.$(( seq + 1 ))" ]]; then
+      seq=$(( seq + 1 ))
+      wd_start "$seq"
+    fi
+    sleep 0.2
   done
-  : > "$dir/fired"
-  log "Firing: $reason."
-  if restore_loop "$dir/originals" "$RESTORE_DEADLINE" "$dir/cancel" "$dir/mutator"; then
-    : > "$dir/restored"
+  # Firing is terminal for the whole run; nothing ever removes these markers.
+  : > "$RUN_FIRED"
+  : > "$WD_STATE/fired"
+  log "Firing: $reason. No further disconnect is accepted in this run."
+  if [[ -n "$WORKER" ]]; then
+    log "Stopping request $WORKER_SEQ (pid $WORKER) before reading the active set."
+    if stop_pid "$WORKER"; then
+      wait "$WORKER"
+      rc=$?
+      WORKER=""
+    else
+      rc=124
+      log "pid $WORKER survived SIGKILL; recovery cannot be verified while it runs."
+    fi
+    wd_write "res.$WORKER_SEQ" "$rc"
+  fi
+  if [[ -e "$WD_STATE/req.$(( seq + 1 ))" ]]; then wd_write "res.$(( seq + 1 ))" refused; fi
+  if restore_loop "$WD_STATE/originals" "$RESTORE_DEADLINE" "$WORKER"; then
+    : > "$WD_STATE/restored"
     exit 0
   fi
-  : > "$dir/failed"
+  : > "$WD_STATE/failed"
   exit 1
 }
 
 if [[ "${1:-}" == "--watchdog" ]]; then
   DISPLAYCTL="${DISPLAYCTL:?DISPLAYCTL must be set for the watchdog}"
-  watchdog_main "$2" "$3"
+  watchdog_main "$2" "$3" "$4"
 fi
+
+# ---- Foreground test flow. ----
 
 if [[ ! -t 0 || ! -t 1 ]]; then
   echo "hardware-test.sh requires interactive stdin and stdout." >&2
@@ -156,7 +275,9 @@ MUTATION_STARTED=0
 ARMED=0
 WD_DIR=""
 WD_PID=""
-ARMED_AT=0
+REQ_SEQ=0
+OP_OUTPUT=""
+TRIAL_FAILURE=""
 UUID_PATTERN='^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$'
 
 print_recovery_help() {
@@ -174,7 +295,7 @@ EOF
 # Reads one line into ANSWER within $1 seconds; fails on timeout or EOF.
 ask() {
   local t="$1"
-  (( t < 1 )) && t=1
+  if (( t < 1 )); then t=1; fi
   ANSWER=""
   IFS= read -r -t "$t" ANSWER || { ANSWER=""; return 1; }
 }
@@ -197,80 +318,102 @@ confirm_observed() {
   fi
 }
 
-# Ends the run if the watchdog has fired; the EXIT trap then verifies recovery.
+wd_alive() {
+  [[ -n "$WD_PID" ]] && kill -0 "$WD_PID" 2>/dev/null
+}
+
+# Ends the run once any watchdog has fired, or if the armed watchdog is gone.
 check_watchdog() {
-  if [[ "$ARMED" == 1 && -e "$WD_DIR/fired" ]]; then
+  if [[ -e "$RUN_DIR/fired" ]]; then
     echo "The watchdog fired; the disruptive sequence ends here." >&2
     echo "Another disconnect needs a fresh run of this script and a fresh opt-in." >&2
     exit 1
   fi
+  if [[ "$ARMED" == 1 ]] && ! wd_alive; then
+    echo "The watchdog stopped unexpectedly; ending the disruptive sequence." >&2
+    exit 1
+  fi
 }
 
+# Starts a detached watchdog; $1 is the seconds allowed after each disconnect starts.
 arm_watchdog() {
   local fire_after="$1" i
+  check_watchdog
   WD_DIR="$(mktemp -d "$RUN_DIR/watchdog.XXXXXX")"
-  if ! active_uuids > "$WD_DIR/originals" || [[ ! -s "$WD_DIR/originals" ]]; then
+  REQ_SEQ=0
+  if ! active_uuids "$CMD_TIMEOUT" > "$WD_DIR/originals" || [[ ! -s "$WD_DIR/originals" ]]; then
     echo "Could not record the active display set; no disconnect attempted." >&2
     exit 1
   fi
-  # Own process group and nohup: survives Ctrl-C, a closed terminal and a foreground stuck in read.
-  set -m
-  nohup /bin/bash "$SCRIPT_PATH" --watchdog "$WD_DIR" "$fire_after" >> "$WD_DIR/watchdog.log" 2>&1 < /dev/null &
-  WD_PID=$!
-  disown "$WD_PID"
-  set +m
+  # Subshell, own process group and nohup: survives Ctrl-C, a closed terminal and a killed script.
+  ( set -m; nohup /bin/bash "$SCRIPT_PATH" --watchdog "$WD_DIR" "$$" "$fire_after" \
+      >> "$WD_DIR/watchdog.log" 2>&1 < /dev/null & )
   for (( i = 0; i < 50; i++ )); do
     [[ -e "$WD_DIR/ready" ]] && break
     sleep 0.1
   done
+  WD_PID="$(cat "$WD_DIR/pid" 2>/dev/null || true)"
   if [[ ! -e "$WD_DIR/ready" ]]; then
-    kill "$WD_PID" 2>/dev/null || true
+    if [[ -n "$WD_PID" ]]; then kill "$WD_PID" 2>/dev/null || true; fi
     echo "The watchdog did not start; no disconnect attempted." >&2
     exit 1
   fi
   ARMED=1
-  ARMED_AT=$SECONDS
   MUTATION_STARTED=1
-  echo "Watchdog armed (log: $WD_DIR/watchdog.log). Without confirmation it restores displays after ${fire_after}s."
+  echo "Watchdog armed (log: $WD_DIR/watchdog.log). It runs each display change itself."
 }
 
-disarm_watchdog() {
-  local i
-  : > "$WD_DIR/cancel"
-  for (( i = 0; i < 50; i++ )); do
-    kill -0 "$WD_PID" 2>/dev/null || break
-    sleep 0.1
+# Asks the watchdog to run `displayctl $2...` with a $1-second limit; output lands in OP_OUTPUT.
+request_op() {
+  local limit="$1" n end
+  shift
+  check_watchdog
+  REQ_SEQ=$(( REQ_SEQ + 1 ))
+  n=$REQ_SEQ
+  OP_OUTPUT=""
+  printf '%s\n' "$limit" "$@" > "$WD_DIR/req.$n.tmp"
+  mv -f "$WD_DIR/req.$n.tmp" "$WD_DIR/req.$n"
+  end=$(( $(now) + limit + ESCALATION + 5 ))
+  while [[ ! -e "$WD_DIR/res.$n" ]]; do
+    if { ! wd_alive || (( $(now) >= end )); } && [[ ! -e "$WD_DIR/res.$n" ]]; then
+      echo "No result from the watchdog for: displayctl $*" >&2
+      return 124
+    fi
+    sleep 0.2
   done
-  ARMED=0
-}
-
-# Like run_bounded, but records the pid so recovery waits until this mutation has exited.
-run_mutation() {
-  local rc=0
-  RECORD_PID="$WD_DIR/mutator"
-  run_bounded "$@" || rc=$?
-  RECORD_PID=""
-  return "$rc"
-}
-
-# Restores the set recorded at arming, verifies it, then disarms.
-restore_and_disarm() {
-  if restore_loop "$WD_DIR/originals" "$RESTORE_DEADLINE" "" "$WD_DIR/mutator"; then
-    disarm_watchdog
-  else
-    return 1
+  OP_OUTPUT="$(cat "$WD_DIR/out.$n" 2>/dev/null || true)"
+  if [[ "$(cat "$WD_DIR/res.$n")" == "refused" ]]; then
+    echo "The watchdog refused: displayctl $*" >&2
+    return 75
   fi
+  return "$(cat "$WD_DIR/res.$n")"
 }
 
-# Asks for proof of a usable screen within what is left of the confirmation window.
+# Asks the watchdog to verify the original set and exit; it fires instead if that fails.
+disarm_watchdog() {
+  local end=$(( $(now) + DISARM_SETTLE + CMD_TIMEOUT + ESCALATION + 5 ))
+  : > "$WD_DIR/disarm"
+  while wd_alive && (( $(now) < end )); do
+    sleep 0.2
+  done
+  if [[ -e "$WD_DIR/disarmed" ]]; then
+    ARMED=0
+    return 0
+  fi
+  echo "The watchdog could not verify the original displays; it restores them and the run ends." >&2
+  return 1
+}
+
+# Asks for proof of a usable screen before the watchdog's deadline for the last disconnect.
 confirm_screen() {
   local remaining
   check_watchdog
-  remaining=$(( CONFIRM_TIMEOUT - (SECONDS - ARMED_AT) ))
+  remaining=$(( $(cat "$WD_DIR/confirm_by") - $(now) ))
   echo "$1 Type YES within ${remaining}s, or displays are restored automatically:"
   if ask "$remaining" && [[ "$ANSWER" == "YES" ]]; then
     check_watchdog
     : > "$WD_DIR/confirmed"
+    check_watchdog
     echo "Screen confirmed. The watchdog stays armed until the original displays are verified active."
   else
     echo "No YES in time; ending the disruptive sequence." >&2
@@ -279,24 +422,34 @@ confirm_screen() {
 }
 
 on_exit() {
-  local status=$? target
+  local status=$? end
   trap - EXIT INT TERM HUP
+  set +e
   if [[ "$MUTATION_STARTED" != 1 ]]; then
     exit "$status"
   fi
   echo ""
-  echo "Recovery: restoring every display that was active..."
-  target="$INITIAL_ACTIVE_FILE"
-  if [[ "$ARMED" == 1 ]]; then
+  if [[ "$ARMED" == 1 ]] && wd_alive; then
+    echo "Recovery: the watchdog stops any running display change and restores every display that was active..."
     : > "$WD_DIR/fire"
-    target="$WD_DIR/originals"
+    end=$(( $(now) + DISARM_SETTLE + CMD_TIMEOUT + 2 * ESCALATION + RESTORE_DEADLINE + 5 ))
+    while wd_alive && (( $(now) < end )); do
+      sleep 0.5
+    done
   fi
-  if restore_loop "$target" "$RESTORE_DEADLINE" "" "${WD_DIR:+$WD_DIR/mutator}"; then
-    [[ "$ARMED" == 1 ]] && disarm_watchdog
+  if [[ -e "$RUN_DIR/fired" ]]; then
+    echo "The watchdog fired in this run. Another disconnect needs a fresh run and a fresh opt-in."
+  fi
+  if [[ -e "$WD_DIR/restored" || -e "$WD_DIR/disarmed" ]]; then
     echo "Recovery verified with list --json. Check every physically present display visually."
   else
-    print_recovery_help
-    (( status == 0 )) && status=1
+    echo "Recovery: retrying connect all until every display active at the start is back..."
+    if restore_loop "$INITIAL_ACTIVE_FILE" "$RESTORE_DEADLINE" ""; then
+      echo "Recovery verified with list --json. Check every physically present display visually."
+    else
+      print_recovery_help
+      (( status == 0 )) && status=1
+    fi
   fi
   exit "$status"
 }
@@ -319,11 +472,70 @@ choose_uuid() {
   REPLY="$ANSWER"
 }
 
+# App-only trial of one display. Sets TRIAL_FAILURE unless it came back by itself, unaided.
+run_trial() {
+  local label="$1" uuid="$2" rc=0 reverted=0 settle_end
+  TRIAL_FAILURE=""
+  echo ""
+  echo "Trial: the $label display goes dark for up to ${TRIAL_SECONDS}s and should return by itself."
+  confirm_exact "TRIAL DISCONNECT $label $uuid"
+  # The trial's watchdog waits for the trial, the settle time and a margin before it intervenes.
+  arm_watchdog $(( TRIAL_SECONDS + TRIAL_SETTLE + 2 * TRIAL_MARGIN ))
+  request_op $(( TRIAL_SECONDS + TRIAL_MARGIN )) disconnect "$uuid" --trial "$TRIAL_SECONDS" || rc=$?
+  if [[ -n "$OP_OUTPUT" ]]; then printf '%s\n' "$OP_OUTPUT"; fi
+  echo "Trial command exited $rc; checking with list --json that the display returned..."
+  settle_end=$(( $(now) + TRIAL_SETTLE ))
+  while [[ ! -e "$RUN_DIR/fired" ]]; do
+    if originals_active "$WD_DIR/originals" "$TRIAL_MARGIN"; then
+      reverted=1
+      break
+    fi
+    if (( $(now) >= settle_end )); then break; fi
+    sleep 1
+  done
+  # Restoration by the watchdog never counts: the check must see an unaided revert.
+  if [[ -e "$RUN_DIR/fired" || -e "$WD_DIR/intervened" ]]; then
+    TRIAL_FAILURE="the watchdog had to intervene"
+  elif [[ "$reverted" != 1 ]]; then
+    TRIAL_FAILURE="the display did not come back by itself within ${TRIAL_SETTLE}s"
+  elif [[ "$rc" != 0 ]]; then
+    TRIAL_FAILURE="the trial command exited $rc"
+  elif ! disarm_watchdog || [[ -e "$WD_DIR/intervened" ]]; then
+    TRIAL_FAILURE="the watchdog could not verify the displays at disarm"
+  fi
+  return 0
+}
+
+# Session-scoped disconnect and UUID reconnect of one display, both run by the watchdog.
+session_round_trip() {
+  local label="$1" uuid="$2"
+  echo ""
+  confirm_exact "DISCONNECT $label $uuid"
+  arm_watchdog "$CONFIRM_TIMEOUT"
+  if ! request_op "$CMD_TIMEOUT" disconnect "$uuid"; then
+    printf '%s\n' "$OP_OUTPUT"
+    echo "The disconnect failed; ending the disruptive sequence." >&2
+    exit 1
+  fi
+  confirm_screen "The $label display should now be dark and another screen usable."
+  confirm_exact "RECONNECT $label $uuid"
+  if ! request_op "$CMD_TIMEOUT" connect "$uuid"; then
+    printf '%s\n' "$OP_OUTPUT"
+    echo "connect $uuid failed; the watchdog restores displays and the run ends." >&2
+    exit 1
+  fi
+  if ! disarm_watchdog; then
+    exit 1
+  fi
+  confirm_observed "The $label display reconnected."
+}
+
 echo ""
 echo "WARNING: This test invokes undocumented private macOS APIs and will"
 echo "temporarily disconnect displays and change physical monitor brightness."
-echo "A detached watchdog restores displays if you do not confirm a usable screen"
-echo "within ${CONFIRM_TIMEOUT}s. Keep another recovery terminal available. No force option is used."
+echo "A detached watchdog runs every disconnect and restores displays if you do not"
+echo "confirm a usable screen within ${CONFIRM_TIMEOUT}s. Keep another recovery terminal available."
+echo "No force option is used."
 echo ""
 
 INITIAL_JSON="$(run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" list --json)"
@@ -382,56 +594,15 @@ confirm_exact "SET HDMI BRIGHTNESS $BRIGHTNESS_PERCENT"
 run_bounded "$CMD_TIMEOUT" "$DISPLAYCTL" brightness set "$EXTERNAL_UUID" "$BRIGHTNESS_PERCENT"
 confirm_observed "The HDMI monitor changed physical brightness."
 
-# Step 1: app-only trial; macOS should revert it when displayctl exits.
-echo ""
-echo "Trial: the internal display goes dark for up to ${TRIAL_SECONDS}s and should return by itself."
-confirm_exact "TRIAL DISCONNECT INTERNAL $INTERNAL_UUID"
-arm_watchdog $(( TRIAL_SECONDS + CONFIRM_TIMEOUT ))
-TRIAL_STATUS=0
-run_mutation $(( TRIAL_SECONDS + CMD_TIMEOUT )) "$DISPLAYCTL" disconnect "$INTERNAL_UUID" --trial "$TRIAL_SECONDS" \
-  || TRIAL_STATUS=$?
-echo "Trial command exited $TRIAL_STATUS; checking with list --json that the display returned..."
-TRIAL_REVERTED=0
-for (( i = 0; i <= TRIAL_SETTLE; i++ )); do
-  if originals_active "$WD_DIR/originals"; then
-    TRIAL_REVERTED=1
-    break
-  fi
-  sleep 1
-done
-if [[ "$TRIAL_REVERTED" != 1 ]]; then
-  echo "FAIL: the internal display did not return after the trial; app-only revert is not proven." >&2
+# Step 1: internal app-only trial; macOS should revert it when displayctl exits.
+run_trial "INTERNAL" "$INTERNAL_UUID"
+if [[ -n "$TRIAL_FAILURE" ]]; then
+  echo "FAIL: internal trial: $TRIAL_FAILURE. App-only revert is not proven." >&2
   echo "Session-scoped disconnects are skipped." >&2
   exit 1
 fi
-disarm_watchdog
-echo "The internal display is active again after the trial."
-if [[ "$TRIAL_STATUS" != 0 ]]; then
-  echo "FAIL: the trial command itself failed; session-scoped disconnects are skipped." >&2
-  exit 1
-fi
+echo "The internal display is active again after the trial, with no watchdog help."
 confirm_observed "The internal display went dark during the trial and came back by itself."
-
-# Session-scoped disconnect and reconnect of one display, guarded by the watchdog.
-session_round_trip() {
-  local label="$1" uuid="$2"
-  echo ""
-  confirm_exact "DISCONNECT $label $uuid"
-  arm_watchdog "$CONFIRM_TIMEOUT"
-  if ! run_mutation "$CMD_TIMEOUT" "$DISPLAYCTL" disconnect "$uuid"; then
-    echo "The disconnect failed; ending the disruptive sequence." >&2
-    exit 1
-  fi
-  confirm_screen "The $label display should now be dark and another screen usable."
-  confirm_exact "RECONNECT $label $uuid"
-  check_watchdog
-  run_mutation "$CMD_TIMEOUT" "$DISPLAYCTL" connect "$uuid" || echo "connect $uuid failed; retrying connect all." >&2
-  if ! restore_and_disarm; then
-    echo "Could not verify the original active displays; ending the disruptive sequence." >&2
-    exit 1
-  fi
-  confirm_observed "The $label display reconnected."
-}
 
 # Step 2: internal session-scoped round trip.
 session_round_trip "INTERNAL" "$INTERNAL_UUID"
@@ -447,43 +618,59 @@ if ! ask "$PROMPT_TIMEOUT" || [[ "$ANSWER" != "I OPT IN TO EXTERNAL DISPLAY DISC
   echo "External steps skipped. Internal results stand."
   exit 0
 fi
+
+# Step 4: external app-only trial; session-scoped external steps need it to pass.
+run_trial "EXTERNAL" "$EXTERNAL_UUID"
+if [[ -n "$TRIAL_FAILURE" ]]; then
+  echo "External trial failed: $TRIAL_FAILURE."
+  echo "RESULT: external disconnect is unsupported on this macOS (D-004)."
+  echo "Skipped: the external session round trip and the final-display test. Internal results stand."
+  exit 0
+fi
+confirm_observed "The external display went dark during the trial and came back by itself."
+
+# Step 5: external session-scoped round trip.
 session_round_trip "EXTERNAL" "$EXTERNAL_UUID"
 
+# Step 6: final-display refusal; every setup disconnect has its own typed confirmation.
 echo ""
 echo "Final-display protection: every active display except the internal one is disconnected first."
-PREPARE_UUIDS="$(active_uuids | grep -Fvx -- "$INTERNAL_UUID" || true)"
-echo "Displays to disconnect:"
-echo "$PREPARE_UUIDS"
-confirm_exact "PREPARE FINAL DISPLAY TEST"
-arm_watchdog "$CONFIRM_TIMEOUT"
-while IFS= read -r PREPARE_UUID; do
-  [[ -z "$PREPARE_UUID" ]] && continue
-  if ! run_mutation "$CMD_TIMEOUT" "$DISPLAYCTL" disconnect "$PREPARE_UUID"; then
+PREPARE_UUIDS="$(active_uuids "$CMD_TIMEOUT" | grep -Fvx -- "$INTERNAL_UUID" || true)"
+if [[ -z "$PREPARE_UUIDS" ]]; then
+  echo "No other active display found; the final-display test cannot run." >&2
+  exit 1
+fi
+for PREPARE_UUID in $PREPARE_UUIDS; do
+  confirm_exact "DISCONNECT FOR FINAL DISPLAY TEST $PREPARE_UUID"
+  if [[ "$ARMED" != 1 ]]; then arm_watchdog "$CONFIRM_TIMEOUT"; fi
+  if ! request_op "$CMD_TIMEOUT" disconnect "$PREPARE_UUID"; then
+    printf '%s\n' "$OP_OUTPUT"
     echo "Disconnect of $PREPARE_UUID failed; ending the disruptive sequence." >&2
     exit 1
   fi
-done <<< "$PREPARE_UUIDS"
-confirm_screen "Only the internal display should be lit and usable."
-if [[ "$(active_uuids)" != "$INTERNAL_UUID" ]]; then
+  confirm_screen "$PREPARE_UUID should now be dark and the internal display usable."
+done
+if [[ "$(active_uuids "$CMD_TIMEOUT")" != "$INTERNAL_UUID" ]]; then
   echo "Could not establish exactly one active display; ending the disruptive sequence." >&2
   exit 1
 fi
 confirm_exact "ATTEMPT PROTECTED DISCONNECT $INTERNAL_UUID"
-check_watchdog
-if REFUSAL_OUTPUT="$(run_mutation "$CMD_TIMEOUT" "$DISPLAYCTL" disconnect "$INTERNAL_UUID" 2>&1)"; then
+if request_op "$CMD_TIMEOUT" disconnect "$INTERNAL_UUID"; then
   echo "CRITICAL: disconnecting the final active display unexpectedly succeeded." >&2
   exit 1
 fi
-echo "$REFUSAL_OUTPUT"
-if [[ "$REFUSAL_OUTPUT" != *"Cannot disconnect the last active display"* ]]; then
+check_watchdog
+echo "$OP_OUTPUT"
+if [[ "$OP_OUTPUT" != *"Cannot disconnect the last active display"* ]]; then
   echo "The command failed for an unexpected reason; this is not a safety pass." >&2
   exit 1
 fi
 echo "The command returned the expected last-active-display error."
-confirm_observed "The final active display remained connected after the refusal."
-check_watchdog
-if ! restore_and_disarm; then
-  echo "Could not verify the original active displays after the final-display test." >&2
+confirm_screen "The internal display should still be lit and usable after the refusal."
+echo "Reconnecting the displays disconnected for this test..."
+request_op "$CMD_TIMEOUT" connect all || echo "connect all exited $?; the watchdog now verifies the original set." >&2
+printf '%s\n' "$OP_OUTPUT"
+if ! disarm_watchdog; then
   exit 1
 fi
 confirm_observed "Every physically present display is lit again."
