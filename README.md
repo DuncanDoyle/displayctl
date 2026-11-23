@@ -133,7 +133,8 @@ The script builds `displayctl`, prints the initial inventory, and accepts only U
 Before each disconnect the script starts a detached watchdog. It runs in its own process group, so Ctrl-C, a closed terminal or a killed script do not stop it.
 
 - The watchdog runs every display change itself. The script only sends it requests. So the watchdog knows about each disconnect before it starts, knows when it ends, and can stop it.
-- After each disconnect you must type `YES` within 20 seconds to confirm a usable screen. Without it, or if the script dies, the watchdog fires.
+- After each disconnect you must type `YES` within 20 seconds to confirm a usable screen. Without it, or if the script dies, the watchdog fires. A `YES` that arrives after the deadline does not count.
+- If the watchdog itself dies, the script restores the displays. It first waits for any running `displayctl` to finish, and stops it at its time limit.
 - When it fires, it stops any running `displayctl` (TERM, then KILL), waits until that process is gone, and only then reads the active displays. It retries `connect all` until the original set is active or a 90-second deadline passes. Every `list` and `connect all` call counts toward that deadline.
 - Firing ends the run. No later disconnect is accepted, and a new disconnect needs a fresh run and a fresh opt-in.
 - The watchdog disarms only after it has verified the original displays are active.
@@ -143,10 +144,11 @@ Before each disconnect the script starts a detached watchdog. It runs in its own
 1. Brightness get and set on the HDMI monitor.
 2. Internal `--trial`. It passes only if the display comes back by itself. If the watchdog has to step in, the trial fails. Session-scoped steps run only after a pass.
 3. Internal session-scoped disconnect, screen confirmation, then reconnect by UUID.
-4. External opt-in. You type a separate sentence; anything else skips all external steps.
-5. External `--trial`. If the display does not come back by itself, the script reports external disconnect as unsupported on this macOS and skips steps 6 and 7.
-6. External session-scoped disconnect and reconnect by UUID.
-7. Final-display refusal: each other display is disconnected with its own confirmation, then the script checks that disconnecting the internal display is refused.
+4. Unattended run. This is a separate run of `Scripts/hardware-test.sh`, done after a run that passed steps 1 to 3. Repeat steps 1 and 2. At step 3, type the `DISCONNECT INTERNAL` line, then withhold the `YES` for the screen confirmation. The watchdog must fire within 20 seconds and restore a usable screen. Firing ends that run. Record the result, then start a fresh run for step 5.
+5. External opt-in, in a fresh run after steps 1 to 3 pass again. You type a separate sentence; anything else skips all external steps.
+6. External `--trial`. If the display does not come back by itself, the script reports external disconnect as unsupported on this macOS and skips steps 7 and 8.
+7. External session-scoped disconnect and reconnect by UUID.
+8. Final-display refusal: each other display is disconnected with its own confirmation, then the script checks that disconnecting the internal display is refused.
 
 USB-C recabling and logout/login stay manual.
 

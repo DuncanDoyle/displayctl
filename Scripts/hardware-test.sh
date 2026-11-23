@@ -39,17 +39,37 @@ min() {
   if (( $1 < $2 )); then echo "$1"; else echo "$2"; fi
 }
 
+# Succeeds while pid $1 exists and is not a zombie; a zombie can no longer change displays.
+alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]
+}
+
+# Succeeds while pid $1 is a running displayctl, so a reused pid is never mistaken for a worker.
+worker_running() {
+  [[ -n "$1" ]] && alive "$1" && ps -o command= -p "$1" 2>/dev/null | grep -Fq -- "$DISPLAYCTL"
+}
+
+# Sends TERM to every descendant of pid $1, deepest first.
+term_descendants() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    term_descendants "$child"
+    kill -TERM "$child" 2>/dev/null || true
+  done
+}
+
 # Sends TERM, then KILL after KILL_GRACE seconds; fails if the process outlives KILL_WAIT more.
 stop_pid() {
   local pid="$1" i
   kill -TERM "$pid" 2>/dev/null || return 0
   for (( i = 0; i < KILL_GRACE * 5; i++ )); do
-    kill -0 "$pid" 2>/dev/null || return 0
+    alive "$pid" || return 0
     sleep 0.2
   done
   kill -KILL "$pid" 2>/dev/null || return 0
   for (( i = 0; i < KILL_WAIT * 5; i++ )); do
-    kill -0 "$pid" 2>/dev/null || return 0
+    alive "$pid" || return 0
     sleep 0.2
   done
   return 1
@@ -101,7 +121,7 @@ restore_loop() {
       log "Hard deadline reached; originally active displays are not all active."
       return 1
     fi
-    if [[ -n "$worker" ]] && kill -0 "$worker" 2>/dev/null; then
+    if worker_running "$worker"; then
       log "displayctl worker $worker is still running; the active set is not read until it is gone."
     elif originals_active "$originals" "$(min "$CMD_TIMEOUT" "$remaining")"; then
       log "Restored: every originally active display is active."
@@ -148,14 +168,51 @@ wd_start() {
   WORKER=$!
   WORKER_SEQ="$seq"
   WORKER_DEADLINE=$(( $(now) + WORKER_TIMEOUT ))
+  # The test script's own recovery reads this if the watchdog is gone.
+  wd_write worker "$WORKER $WORKER_DEADLINE"
   log "Request $seq: started displayctl ${args[*]} as pid $WORKER, limit ${WORKER_TIMEOUT}s."
 }
 
+# Succeeds when the confirmation's timestamp is before the deadline; a late one never counts.
+wd_confirmed() {
+  local at
+  at="$(cat "$WD_STATE/confirmed" 2>/dev/null)" || return 1
+  [[ "$at" =~ ^[0-9]+$ ]] && (( at < $(cat "$WD_STATE/confirm_by") ))
+}
+
+# Sets REASON and succeeds when the watchdog must fire now.
+wd_must_fire() {
+  if [[ -e "$WD_STATE/fire" ]]; then
+    REASON="the test script requested recovery"
+  elif ! kill -0 "$FG_PID" 2>/dev/null; then
+    REASON="the test script is gone"
+  elif [[ -n "$WORKER" ]] && (( $(now) >= WORKER_DEADLINE )); then
+    REASON="request $WORKER_SEQ ran past its ${WORKER_TIMEOUT}s limit"
+  elif ! wd_confirmed && (( $(now) >= $(cat "$WD_STATE/confirm_by") )); then
+    REASON="no confirmation in time"
+  elif (( $(now) - ARMED_AT >= ARMED_MAX )); then
+    REASON="still armed after ${ARMED_MAX}s"
+  else
+    return 1
+  fi
+}
+
 # Verifies the original active set for a disarm, with no worker running.
+# Returns 2 if a firing condition comes up meanwhile; each `list` runs in the background.
 wd_verify() {
-  local end=$(( $(now) + DISARM_SETTLE ))
+  local end=$(( $(now) + DISARM_SETTLE )) pid
   while true; do
-    originals_active "$WD_STATE/originals" "$CMD_TIMEOUT" && return 0
+    originals_active "$WD_STATE/originals" "$CMD_TIMEOUT" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      if wd_must_fire; then
+        term_descendants "$pid"
+        stop_pid "$pid" && wait "$pid"
+        return 2
+      fi
+      sleep 0.2
+    done
+    wait "$pid" && return 0
     (( $(now) >= end )) && return 1
     sleep 1
   done
@@ -163,54 +220,40 @@ wd_verify() {
 
 # $1 state dir, $2 test script pid, $3 seconds allowed after each disconnect starts.
 watchdog_main() {
-  local fg_pid="$2" armed_at seq=0 reason rc
+  local seq=0 rc
   WD_STATE="$1"
+  FG_PID="$2"
   FIRE_AFTER="$3"
   RUN_FIRED="$(dirname "$WD_STATE")/fired"
   INTERVENED_MARK="$WD_STATE/intervened"
   WORKER=""
+  REASON=""
   set +e
   trap '' HUP INT
-  armed_at=$(now)
-  wd_write confirm_by $(( armed_at + FIRE_AFTER ))
+  ARMED_AT=$(now)
+  wd_write confirm_by $(( ARMED_AT + FIRE_AFTER ))
   wd_write pid "$$"
-  log "Armed (pid $$, test script $fg_pid): fires ${FIRE_AFTER}s after a disconnect starts unless confirmed; disarm within ${ARMED_MAX}s."
+  log "Armed (pid $$, test script $FG_PID): fires ${FIRE_AFTER}s after a disconnect starts unless confirmed; disarm within ${ARMED_MAX}s."
   : > "$WD_STATE/ready"
   while true; do
     if [[ -n "$WORKER" ]] && ! kill -0 "$WORKER" 2>/dev/null; then
       wait "$WORKER"
       rc=$?
+      rm -f "$WD_STATE/worker"
       wd_write "res.$WORKER_SEQ" "$rc"
       log "Request $WORKER_SEQ: exited $rc."
       WORKER=""
     fi
-    if [[ -e "$WD_STATE/fire" ]]; then
-      reason="the test script requested recovery"
-      break
-    fi
-    if ! kill -0 "$fg_pid" 2>/dev/null; then
-      reason="the test script is gone"
-      break
-    fi
-    if [[ -n "$WORKER" ]] && (( $(now) >= WORKER_DEADLINE )); then
-      reason="request $WORKER_SEQ ran past its ${WORKER_TIMEOUT}s limit"
-      break
-    fi
+    wd_must_fire && break
     if [[ -z "$WORKER" && -e "$WD_STATE/disarm" ]]; then
-      if wd_verify; then
-        : > "$WD_STATE/disarmed"
-        log "Disarmed: every originally active display is verified active."
-        exit 0
-      fi
-      reason="the original displays were not all active at disarm"
-      break
-    fi
-    if [[ ! -e "$WD_STATE/confirmed" ]] && (( $(now) >= $(cat "$WD_STATE/confirm_by") )); then
-      reason="no confirmation in time"
-      break
-    fi
-    if (( $(now) - armed_at >= ARMED_MAX )); then
-      reason="still armed after ${ARMED_MAX}s"
+      wd_verify
+      case $? in
+        0)
+          : > "$WD_STATE/disarmed"
+          log "Disarmed: every originally active display is verified active."
+          exit 0 ;;
+        1) REASON="the original displays were not all active at disarm" ;;
+      esac
       break
     fi
     if [[ -z "$WORKER" && -e "$WD_STATE/req.$(( seq + 1 ))" ]]; then
@@ -222,12 +265,13 @@ watchdog_main() {
   # Firing is terminal for the whole run; nothing ever removes these markers.
   : > "$RUN_FIRED"
   : > "$WD_STATE/fired"
-  log "Firing: $reason. No further disconnect is accepted in this run."
+  log "Firing: $REASON. No further disconnect is accepted in this run."
   if [[ -n "$WORKER" ]]; then
     log "Stopping request $WORKER_SEQ (pid $WORKER) before reading the active set."
     if stop_pid "$WORKER"; then
       wait "$WORKER"
       rc=$?
+      rm -f "$WD_STATE/worker"
       WORKER=""
     else
       rc=124
@@ -292,12 +336,11 @@ Logs: $RUN_DIR
 EOF
 }
 
-# Reads one line into ANSWER within $1 seconds; fails on timeout or EOF.
+# Reads one line into ANSWER within $1 seconds; fails on timeout or EOF, and at once if $1 < 1.
 ask() {
-  local t="$1"
-  if (( t < 1 )); then t=1; fi
   ANSWER=""
-  IFS= read -r -t "$t" ANSWER || { ANSWER=""; return 1; }
+  (( $1 >= 1 )) || return 1
+  IFS= read -r -t "$1" ANSWER || { ANSWER=""; return 1; }
 }
 
 confirm_exact() {
@@ -406,13 +449,20 @@ disarm_watchdog() {
 
 # Asks for proof of a usable screen before the watchdog's deadline for the last disconnect.
 confirm_screen() {
-  local remaining
+  local deadline remaining at
   check_watchdog
-  remaining=$(( $(cat "$WD_DIR/confirm_by") - $(now) ))
+  deadline="$(cat "$WD_DIR/confirm_by")"
+  remaining=$(( deadline - $(now) ))
   echo "$1 Type YES within ${remaining}s, or displays are restored automatically:"
   if ask "$remaining" && [[ "$ANSWER" == "YES" ]]; then
+    at=$(now)
+    if (( at >= deadline )); then
+      echo "YES arrived after the deadline; the watchdog restores displays and the run ends." >&2
+      exit 1
+    fi
     check_watchdog
-    : > "$WD_DIR/confirmed"
+    # The watchdog ignores a confirmation stamped at or after its deadline.
+    printf '%s\n' "$at" > "$WD_DIR/confirmed.tmp" && mv -f "$WD_DIR/confirmed.tmp" "$WD_DIR/confirmed"
     check_watchdog
     echo "Screen confirmed. The watchdog stays armed until the original displays are verified active."
   else
@@ -421,8 +471,22 @@ confirm_screen() {
   fi
 }
 
+# Waits for the watchdog's last recorded worker until its deadline, then stops it.
+# Prints the worker pid; fails if that worker is still running.
+quiesce_worker() {
+  local pid="" deadline=0
+  if [[ -n "$WD_DIR" && -f "$WD_DIR/worker" ]]; then read -r pid deadline < "$WD_DIR/worker" || true; fi
+  echo "$pid"
+  worker_running "$pid" || return 0
+  echo "displayctl worker $pid is still running; waiting until its deadline before reading displays..." >&2
+  while worker_running "$pid" && (( $(now) < deadline )); do sleep 0.2; done
+  worker_running "$pid" || return 0
+  echo "Stopping displayctl worker $pid (TERM, then KILL)..." >&2
+  stop_pid "$pid"
+}
+
 on_exit() {
-  local status=$? end
+  local status=$? end worker
   trap - EXIT INT TERM HUP
   set +e
   if [[ "$MUTATION_STARTED" != 1 ]]; then
@@ -443,8 +507,10 @@ on_exit() {
   if [[ -e "$WD_DIR/restored" || -e "$WD_DIR/disarmed" ]]; then
     echo "Recovery verified with list --json. Check every physically present display visually."
   else
+    # No display is read while a worker may still run, whichever process recovers.
+    worker="$(quiesce_worker)" || echo "displayctl worker $worker survived SIGKILL; recovery cannot be verified while it runs." >&2
     echo "Recovery: retrying connect all until every display active at the start is back..."
-    if restore_loop "$INITIAL_ACTIVE_FILE" "$RESTORE_DEADLINE" ""; then
+    if restore_loop "$INITIAL_ACTIVE_FILE" "$RESTORE_DEADLINE" "$worker"; then
       echo "Recovery verified with list --json. Check every physically present display visually."
     else
       print_recovery_help

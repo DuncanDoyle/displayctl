@@ -185,7 +185,7 @@ final class CLIParserTests: XCTestCase {
           "disconnected uuid=\(uuid.uuidString) runtimeID=42 name=Desk Display active=false\n",
         holdUntil: committedAt + .seconds(5)))
     let calls = await service.calls
-    XCTAssertEqual(calls, ["trial:42"])
+    XCTAssertEqual(calls, ["trial:42:5"])
     let help = await CLIApplication(service: service).execute(.help)
     XCTAssertTrue(help.stdout.contains("displayctl disconnect <selector> [--trial <1...60>]"))
     XCTAssertTrue(help.stdout.contains("displayctl forget <uuid|all>"))
@@ -199,9 +199,10 @@ final class CLIParserTests: XCTestCase {
       .appendingPathComponent("displayctl-tests-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let service = LiveCLIService(
-      inventory: screens, transaction: screens.transaction, stateDirectory: directory)
+      inventory: screens, transaction: screens.transaction, stateDirectory: directory,
+      trialExpiry: TrialExpiry { _ in })
 
-    let trial = try await service.disconnectTrial("1")
+    let trial = try await service.disconnectTrial("1", seconds: 60)
     XCTAssertEqual(screens.completeOptions, [.forAppOnly])
     XCTAssertFalse(trial.display.isActive)
     // The refresh that verifies the disable runs after the commit.
@@ -209,6 +210,45 @@ final class CLIParserTests: XCTestCase {
 
     _ = try await service.disconnect("2")
     XCTAssertEqual(screens.completeOptions, [.forAppOnly, .forSession])
+  }
+  func testTrialExpiryEndsTheProcessWhileTheRefreshIsBlocked() async throws {
+    let gate = DispatchSemaphore(value: 0)
+    let screens = FakeScreens(
+      [display(uuid: UUID(), id: 1), display(uuid: UUID(), id: 2)], blockAfterDisable: gate)
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("displayctl-tests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let fired = expectation(description: "trial expiry fired")
+    let codes = ExitCodes()
+    let expiry = TrialExpiry { code in
+      codes.append(code)
+      fired.fulfill()
+    }
+    let service = LiveCLIService(
+      inventory: screens, transaction: screens.transaction, stateDirectory: directory,
+      trialExpiry: expiry)
+    let started = ContinuousClock.now
+
+    // The post-commit refresh blocks until the gate opens; the expiry must not wait for it.
+    let trial = Task { try await service.disconnectTrial("1", seconds: 1) }
+    await fulfillment(of: [fired], timeout: 5)
+    XCTAssertLessThan(ContinuousClock.now - started, .seconds(3))
+    XCTAssertEqual(codes.values, [TrialExpiry.unfinishedExitCode])
+    gate.signal()
+    _ = try await trial.value
+  }
+  func testTrialExpiryExitsWithTheFinishedResult() async {
+    let fired = expectation(description: "trial expiry fired")
+    let codes = ExitCodes()
+    let expiry = TrialExpiry { code in
+      codes.append(code)
+      fired.fulfill()
+    }
+    expiry.start(seconds: 1)
+    expiry.committed(at: .now)
+    expiry.finish(0)
+    await fulfillment(of: [fired], timeout: 5)
+    XCTAssertEqual(codes.values, [0])
   }
   func testForgetReportsRemovedEntries() async {
     let entry = DisabledDisplayEntry(
@@ -245,11 +285,17 @@ private final class FakeScreens: DisplaySnapshotProviding, @unchecked Sendable {
   private var displays: [Display]
   private var options: [CGConfigureOption] = []
   private var snapshotAt: ContinuousClock.Instant?
-  init(_ displays: [Display]) { self.displays = displays }
+  private var disabled = false
+  private let blockAfterDisable: DispatchSemaphore?
+  init(_ displays: [Display], blockAfterDisable: DispatchSemaphore? = nil) {
+    self.displays = displays
+    self.blockAfterDisable = blockAfterDisable
+  }
   var completeOptions: [CGConfigureOption] { lock.withLock { options } }
   var lastSnapshotAt: ContinuousClock.Instant? { lock.withLock { snapshotAt } }
   func snapshot() throws -> [Display] {
-    lock.withLock {
+    if let blockAfterDisable, lock.withLock({ disabled }) { blockAfterDisable.wait() }
+    return lock.withLock {
       snapshotAt = .now
       return displays
     }
@@ -262,6 +308,7 @@ private final class FakeScreens: DisplaySnapshotProviding, @unchecked Sendable {
       },
       enable: { _, id, enabled in
         self.lock.withLock {
+          if !enabled { self.disabled = true }
           self.displays = self.displays.map {
             guard $0.runtimeID == id else { return $0 }
             return Display(
@@ -296,8 +343,8 @@ private actor StubService: CLIService {
     self.entries = entries
     self.trialCommit = trialCommit
   }
-  func disconnectTrial(_ selector: String) async throws -> TrialDisconnect {
-    calls.append("trial:\(selector)")
+  func disconnectTrial(_ selector: String, seconds: Int) async throws -> TrialDisconnect {
+    calls.append("trial:\(selector):\(seconds)")
     return TrialDisconnect(display: try checked(displays.last), committedAt: trialCommit)
   }
   func forget(_ uuid: UUID?) async throws -> [DisabledDisplayEntry] {
@@ -328,4 +375,11 @@ private actor StubService: CLIService {
     guard let value else { throw DisplayControlError.configurationFailed("stub missing value") }
     return value
   }
+}
+/// Exit codes a test expiry was asked to end the process with.
+private final class ExitCodes: @unchecked Sendable {
+  private let lock = NSLock()
+  private var codes: [Int32] = []
+  func append(_ code: Int32) { lock.withLock { codes.append(code) } }
+  var values: [Int32] { lock.withLock { codes } }
 }

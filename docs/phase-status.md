@@ -40,8 +40,10 @@ Design changes beyond D-003 without a new decisions.md entry and user approval; 
 - [x] Hardware-test watchdog and internal-first order — d6b1997
 - [x] Codex review of c205693..d6b1997 + triage — reviews/1.1-codex.md, 10 accepted (2 modified)
 - [x] Fix round for reviews/1.1-codex.md
-- [ ] Codex re-review of the fix round ← CURRENT
-- [ ] Hardware test with the user: internal disconnect/reconnect on macOS 27
+- [x] Codex re-review of the fix round — reviews/1.1-fix-codex.md, 4 accepted, 1 rejected (user-confirmed)
+- [x] Fix round 2 for reviews/1.1-fix-codex.md
+- [ ] Hardware test with the user on macOS 27 (user chose hardware before another review round) ← CURRENT
+- [ ] Final Codex review of c205693..HEAD with hardware results + triage
 
 ## Program
 none
