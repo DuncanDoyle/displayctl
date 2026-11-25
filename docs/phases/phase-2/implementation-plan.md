@@ -4,31 +4,33 @@
 
 **Goal:** A menu bar panel with an on/off switch per display, a DDC brightness slider for external displays, and a zero-active-display safety net, run as a per-user launchd agent.
 
-**Architecture:** `DisplayControlCore` gains `ZeroActiveRecovery` (UI-free). A new library `DisplayMenuKit` holds the panel state model and brightness coalescer behind small protocols, so it is unit-tested with fakes. A thin executable `displayctl-menu` holds the SwiftUI `MenuBarExtra`, the Core Graphics and wake observers, and the live adapters.
+**Architecture:** `DisplayControlCore` gains `recoverIfNoneActive()` and `ZeroActiveRecovery`/`RecoveryScheduler` (UI-free). A new library `DisplayMenuKit` holds the panel state model, a serial blocking-work executor and the brightness coalescer behind small protocols, so it is unit-tested with fakes. A thin executable `displayctl-menu` holds the SwiftUI `MenuBarExtra`, the Core Graphics and wake observers, and the live adapters.
 
 **Tech Stack:** Swift 6.4.2, SwiftUI `MenuBarExtra` (`.window` style), AppKit, Observation, XCTest, launchd. No new dependencies.
 
-**Spec:** `docs/phases/phase-2/design.md`
+**Spec:** `docs/phases/phase-2/design.md` (amended after `reviews/design-codex.md`)
 
 ## Global Constraints
 
 - Platform macOS 27.0.1 on Apple Silicon; `Package.swift` keeps `platforms: [.macOS(.v26)]`.
 - No new third-party dependencies; `swift format lint --recursive --strict Sources Tests Package.swift` stays clean (Xcode's bundled `swift format`).
-- The CLI (`Sources/displayctl`) is unchanged.
+- The CLI (`Sources/displayctl`) is unchanged; `connectAll()` keeps its behaviour.
 - One ledger and one lock shared with the CLI: `ConnectionController` with `DisplayControlState.defaultDirectory`.
+- Blocking core calls never run on the main thread or Swift's cooperative pool; they run on one serial `DispatchQueue` (design §5).
 - launchd label `com.github.duncandoyle.displayctl-menu`; binary `~/.local/bin/displayctl-menu`.
-- Safety-net defaults: settle 2 s, 3 recovery attempts 2 s apart.
+- Safety-net defaults: settle 2 s; 3 attempts per episode, 2 s apart; 5 snapshot samples, 2 s apart.
 - Logging: `os.Logger(subsystem: "displayctl", category: "recovery")` and `category: "menu"`.
+- Copy: caption `"Only active display"`; busy `"Busy — another displayctl is running. Try again."`; ledger note `"Saved display list unreadable. See README › Recovery."`; observer failure `"Safety net off: display changes are not being watched."`.
 - Scratch files only under `.agents-tmp/`. Tests are deterministic: fakes and controllable sleepers, no wall-clock waits.
 - No Phase 2 code lands on `main` before Phase 1 closes (D-009). Work on branch `duncandoyle/menuBar`.
 
 ## Review Focus
 
-1. **CLI holds the lock when a switch is flipped** → the row shows "Busy — another displayctl is running. Try again." and the switch shows the real state, not the requested one. Test in Task 3.
-2. **A display disappears while the panel is open or mid-operation** (unplug) → the next refresh drops its row and any brightness state; no stale error or crash. Test in Task 3 and Task 4.
-3. **Ledger unreadable** (corrupt JSON) → the panel still lists online displays and shows one panel-level line naming `displayctl forget all`; the safety net still runs `connectAll`. Tests in Task 2 and Task 3.
-4. **Safety net fires while a CLI disconnect holds the lock** → `connectAll` throws a lock timeout; counted as a failed attempt and retried, never treated as success. Test in Task 2.
-5. **A second click while an operation runs** → ignored; exactly one controller call. Test in Task 3.
+1. **CLI holds the lock when a switch is flipped** → busy text under the row, switch shows the real state. Test in Task 3.
+2. **A display disappears while the panel is open, mid-operation or mid-drag** → its row, error and pending brightness are dropped; no write reaches another monitor. Tests in Tasks 3 and 4.
+3. **Ledger unreadable** → panel lists online displays with the ledger note, file untouched; recovery logs the outcome and still tries online displays. Tests in Tasks 2 and 3.
+4. **Safety net while a CLI command holds the lock, or a CLI `connect` wins the lock first** → lock timeout counts as a failed attempt; after the CLI connect, recovery enables nothing. Tests in Task 2.
+5. **Recovery's own enable triggers a reconfiguration callback and then fails** → the episode still ends after 3 attempts; no new episode until wake or an active display. Test in Task 2.
 
 ---
 
@@ -40,110 +42,127 @@ Throwaway. Answers design §9's open question before the real target exists.
 - Create: `.agents-tmp/menubar-spike/Package.swift`, `.agents-tmp/menubar-spike/Sources/Spike/main.swift`, `.agents-tmp/menubar-spike/spike.plist`
 - Modify: `docs/phase-status.md` (Notes line with the result)
 
-- [ ] **Step 1:** Write a minimal SwiftUI `App` with one `MenuBarExtra("Spike", systemImage: "display") { Toggle("Test", isOn: $on).toggleStyle(.switch); Slider(value: $v) }.menuBarExtraStyle(.window)`, setting `NSApplication.shared.setActivationPolicy(.accessory)` at launch.
+- [ ] **Step 1:** Write a minimal SwiftUI `App` with one `MenuBarExtra("Spike", systemImage: "display") { Toggle("Test", isOn: $on).toggleStyle(.switch); Slider(value: $v); Text(openCount) }.menuBarExtraStyle(.window)`, accessory activation policy, and an `.onAppear` that increments `openCount`.
 - [ ] **Step 2:** `swift build -c release --package-path .agents-tmp/menubar-spike` → exit 0.
-- [ ] **Step 3:** Run the binary directly from Terminal. Ask the user: icon visible, panel opens with a switch and slider, no Dock icon?
-- [ ] **Step 4:** Load it with a LaunchAgent plist (label `com.github.duncandoyle.displayctl-menu-spike`, keys as design §6.4, plist copied to `~/Library/LaunchAgents/`) via `launchctl bootstrap gui/$(id -u) <plist>`. Ask the user the same question. Then `launchctl bootout gui/$(id -u)/com.github.duncandoyle.displayctl-menu-spike` and remove the plist.
-- [ ] **Step 5:** If either run fails, wrap the binary in `Spike.app/Contents/{MacOS/Spike,Info.plist}` with `LSUIElement = true` and repeat Step 4 pointing `ProgramArguments` at `Contents/MacOS/Spike`.
-- [ ] **Step 6:** Record the outcome in `docs/phase-status.md` Notes. If the bundle was needed, add D-010 and change Task 6 to build the bundle. Commit the status change only.
+- [ ] **Step 3:** Run the binary from Terminal. Ask the user: icon visible, panel opens with switch and slider, no Dock icon, and the counter goes up on each close and reopen?
+- [ ] **Step 4:** Load it with a LaunchAgent (label `com.github.duncandoyle.displayctl-menu-spike`, keys as design §6.4) via `launchctl bootstrap gui/$(id -u) <plist>`. Ask the same questions. Then `launchctl bootout gui/$(id -u)/com.github.duncandoyle.displayctl-menu-spike` and remove the plist.
+- [ ] **Step 5:** If either run fails, wrap the binary in `Spike.app/Contents/{MacOS/Spike,Info.plist}` with `LSUIElement = true`, point `ProgramArguments` at `Contents/MacOS/Spike`, and repeat Steps 3–4.
+- [ ] **Step 6:** If the bundle also fails, stop and ask the owner which requirement changes (design §9).
+- [ ] **Step 7:** Record the outcome in `docs/phase-status.md` Notes; if the bundle was needed, add D-010 and Task 6 builds the bundle. Commit.
 
 ---
 
-### Task 2: `ZeroActiveRecovery` in `DisplayControlCore`
-
-Refinement of design §6.3 step 4, made here and written back to the design in this task: at zero active displays the app runs `connectAll` whether or not the ledger reads; `connectAll` already handles online inactive displays and reports an unreadable ledger.
+### Task 2: Safety net in `DisplayControlCore`
 
 **Files:**
+- Modify: `Sources/DisplayControlCore/ConnectionController.swift` (add `recoverIfNoneActive()`; `connectAll()` and it share one private body)
 - Create: `Sources/DisplayControlCore/ZeroActiveRecovery.swift`
-- Test: `Tests/DisplayControlCoreTests/ZeroActiveRecoveryTests.swift`
-- Modify: `docs/phases/phase-2/design.md` §6.3 step 4
+- Test: `Tests/DisplayControlCoreTests/ConnectionControllerTests.swift`, `Tests/DisplayControlCoreTests/ZeroActiveRecoveryTests.swift`
 
 **Interfaces:**
-- Consumes: `DisplaySnapshotProviding.snapshot()`, `ConnectionController.connectAll() throws -> [DisplayConnectionOutcome]`
+- Consumes: `DisplaySnapshotProviding`, `DisplayConnectionOutcome`, existing `connectAll` body
 - Produces:
 ```swift
+extension ConnectionController {
+  /// Under the operation lock: nil if any display is online and active; otherwise connectAll's outcomes.
+  public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]?
+}
+
 public protocol RecoveryConnecting: Sendable {
-  func connectAll() throws -> [DisplayConnectionOutcome]
+  func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]?
 }
 extension ConnectionController: RecoveryConnecting {}
 
 public enum RecoveryOutcome: Equatable, Sendable {
-  case displayActive                 // nothing done
-  case nothingToRecover              // zero active, connectAll returned no outcomes
-  case recovered(attempts: Int)      // at least one display active afterwards
-  case failed(attempts: Int)         // still zero active after maxAttempts
-  case snapshotUnavailable           // every snapshot attempt threw
+  case displayActive               // nothing done
+  case recovered(attempts: Int)    // a snapshot shows an active display afterwards
+  case failed(attempts: Int)       // still none active after maxAttempts
+  case snapshotUnavailable         // maxSnapshotAttempts samples all threw
 }
 
 public struct ZeroActiveRecovery: Sendable {
-  public init(
-    snapshot: any DisplaySnapshotProviding,
-    connector: any RecoveryConnecting,
-    sleep: @escaping @Sendable (Duration) async -> Void,
-    retryDelay: Duration = .seconds(2),
-    maxAttempts: Int = 3,
-    maxSnapshotAttempts: Int = 5,
-    log: @escaping @Sendable (String) -> Void = { _ in }
-  )
+  public init(snapshot: any DisplaySnapshotProviding, connector: any RecoveryConnecting,
+              sleep: @escaping @Sendable (Duration) async -> Void,
+              retryDelay: Duration = .seconds(2), maxAttempts: Int = 3,
+              maxSnapshotAttempts: Int = 5,
+              log: @escaping @Sendable (String) -> Void = { _ in })
   public func run() async -> RecoveryOutcome
 }
 
-/// Debounces triggers: each trigger restarts the settle wait; one `run()` per quiet period.
-/// A run in progress is never cancelled; a trigger during a run schedules one more run after it.
+public enum RecoveryTrigger: Sendable { case launch, reconfiguration, wake }
+
+/// Debounces triggers (settle), runs one episode at a time, and enforces the episode rule:
+/// after .failed or .snapshotUnavailable, only .wake or a snapshot with an active display re-arms it.
 public actor RecoveryScheduler {
-  public init(recovery: ZeroActiveRecovery, settle: Duration = .seconds(2),
+  public init(recovery: ZeroActiveRecovery, snapshot: any DisplaySnapshotProviding,
+              settle: Duration = .seconds(2),
               sleep: @escaping @Sendable (Duration) async throws -> Void,
               onOutcome: @escaping @Sendable (RecoveryOutcome) -> Void = { _ in })
-  public func trigger()
+  public func trigger(_ trigger: RecoveryTrigger)
 }
 ```
+`ZeroActiveRecovery` and `RecoveryScheduler` call the blocking connector and snapshot through the caller-supplied types; the app wraps them in the serial executor (Task 3), tests use fakes.
 
-- [ ] **Step 1: Write the failing tests** (fakes: `ScriptedSnapshot` returning a queued list of `[Display]` or errors; `FakeConnector` recording calls and returning scripted outcomes or throwing; `ManualSleeper` whose `sleep` suspends until the test calls `advance()`):
-  - `testDoesNothingWhileAnyDisplayIsActive` → `.displayActive`, connector calls 0.
-  - `testRunsConnectAllAtZeroActive` → snapshots [inactive], [active]; outcome `.recovered(attempts: 1)`, connector calls 1.
-  - `testNothingToRecoverWhenConnectAllReturnsEmpty` → `.nothingToRecover`, connector calls 1.
-  - `testRunsConnectAllWhenLedgerUnreadable` → connector throws `.configurationFailed("ledger…")` on call 1, snapshot then shows active → `.recovered(attempts: 1)`.
-  - `testLockTimeoutCountsAsFailedAttemptAndRetries` → connector throws `.configurationFailed("flock timed out …")` twice, then succeeds; outcome `.recovered(attempts: 3)`; sleeps recorded `[.seconds(2), .seconds(2)]`.
-  - `testGivesUpAfterMaxAttempts` → always zero active → `.failed(attempts: 3)`, connector calls 3.
-  - `testRetriesInconsistentSnapshot` → snapshot throws `"Display inventory changed while sampling; retry"` twice then returns active → `.displayActive`.
-  - `testSnapshotUnavailableAfterMaxSnapshotAttempts` → snapshot always throws → `.snapshotUnavailable`, connector calls 0.
-  - `testSchedulerCoalescesTriggersInSettleWindow` → three `trigger()` calls before `advance()` → one `run()`.
-  - `testSchedulerRunsAgainForTriggerDuringRun` → trigger during a run → exactly two runs.
-- [ ] **Step 2:** `swift test --scratch-path .agents-tmp/build --filter ZeroActiveRecoveryTests` → FAIL (types not defined).
-- [ ] **Step 3:** Implement in `ZeroActiveRecovery.swift`. Active means `isOnline && isActive`. Snapshot retries need no sleep. A `connectAll` throw is logged and counts as an attempt.
-- [ ] **Step 4:** Same command → PASS. Then full `swift test --parallel --scratch-path .agents-tmp/build` → all pass.
-- [ ] **Step 5:** Update design §6.3 step 4 to the refinement above. Commit: `feat(core): zero-active-display recovery`.
+- [ ] **Step 1: Write failing `ConnectionControllerTests`** (existing `FakeDisplayStore`, `makeController`):
+  - `testRecoverIfNoneActiveReturnsNilWhenADisplayIsActive` → `nil`, no hardware requests.
+  - `testRecoverIfNoneActiveEnablesLedgerAndOnlineInactiveAtZero` → outcomes for each; requests enable both.
+  - `testRecoverAfterCLIConnectWinsLockEnablesNothing` → the fake lock runs a `connect("1")` first (store now has 1 active), then the recovery body → `nil`; display 2 stays inactive.
+- [ ] **Step 2: Write failing `ZeroActiveRecoveryTests`** (fakes: `ScriptedSnapshot` with queued `[Display]` or errors; `FakeConnector` with scripted returns/throws and a call count; `ManualSleeper` recording durations and suspending until `advance()`):
+  - `testDisplayActiveWhenConnectorReturnsNil` → `.displayActive`.
+  - `testRecoveredWhenSnapshotShowsActiveAfterAttempt` → `.recovered(attempts: 1)`.
+  - `testReturnedFailuresAreLoggedIncludingLedgerOutcome` → connector returns `[failure(.recoverySkipped("earlier boot")), DisplayConnectionOutcome(display: nil, result: .failure(.configurationFailed("ledger unreadable")))]` → log lines contain `"earlier boot"` and `"ledger unreadable"`.
+  - `testPartialRecoveryCountsAsRecovered` → one success, one failure, snapshot shows active → `.recovered(attempts: 1)`, failure logged.
+  - `testLockTimeoutCountsAsFailedAttemptAndRetries` → throws `.configurationFailed("flock timed out …")` twice then succeeds → `.recovered(attempts: 3)`, sleeps `[.seconds(2), .seconds(2)]`.
+  - `testGivesUpAfterMaxAttempts` → `.failed(attempts: 3)`, connector calls 3.
+  - `testInconsistentSnapshotResampledAfterDelay` → snapshot throws `"Display inventory changed while sampling; retry"` twice, then shows active → `.recovered`, sleeps include two `.seconds(2)`.
+  - `testSnapshotUnavailableAfterFiveSamples` → `.snapshotUnavailable`.
+- [ ] **Step 3: Write failing `RecoverySchedulerTests`** (same file):
+  - `testTriggersInSettleWindowCoalesce` → three triggers → one run.
+  - `testTriggerDuringRunSchedulesOneMore` → exactly two runs.
+  - `testFailedEpisodeIgnoresReconfigurationTriggers` → episode `.failed`; then `.reconfiguration` while still zero active → no run.
+  - `testFailedEpisodeRearmsOnWake` → `.wake` → one new run.
+  - `testFailedEpisodeRearmsAfterActiveSnapshot` → `.reconfiguration` with a snapshot showing active → re-armed; a later zero-active trigger runs.
+- [ ] **Step 4:** `swift test --scratch-path .agents-tmp/build --filter "ZeroActiveRecoveryTests|ConnectionControllerTests"` → the new tests FAIL.
+- [ ] **Step 5:** Implement. Active means `isOnline && isActive`. A thrown connector error is logged and counts as an attempt.
+- [ ] **Step 6:** Filter → PASS; full `swift test --parallel --scratch-path .agents-tmp/build` → PASS; lint → exit 0.
+- [ ] **Step 7:** Commit: `feat(core): zero-active-display recovery under the operation lock`.
 
 ---
 
-### Task 3: `DisplayMenuKit` — rows and connection switching
+### Task 3: `DisplayMenuKit` — executor, rows and switching
 
 **Files:**
-- Modify: `Package.swift` (library `DisplayMenuKit` → depends on `DisplayControlCore`; test target `DisplayMenuKitTests`)
-- Create: `Sources/DisplayMenuKit/DisplayOperating.swift`, `Sources/DisplayMenuKit/PanelRows.swift`, `Sources/DisplayMenuKit/PanelModel.swift`, `Sources/DisplayMenuKit/ErrorText.swift`
+- Modify: `Package.swift` (library `DisplayMenuKit` → `DisplayControlCore`; test target `DisplayMenuKitTests`)
+- Create: `Sources/DisplayMenuKit/BlockingExecutor.swift`, `Sources/DisplayMenuKit/DisplayOperating.swift`, `Sources/DisplayMenuKit/PanelRows.swift`, `Sources/DisplayMenuKit/PanelModel.swift`, `Sources/DisplayMenuKit/ErrorText.swift`
 - Test: `Tests/DisplayMenuKitTests/PanelRowsTests.swift`, `Tests/DisplayMenuKitTests/PanelModelTests.swift`
 
 **Interfaces:**
-- Consumes: `Display`, `DisabledDisplayEntry`, `DisplayControlError`, `ConnectionController.connect(_:)`, `.disconnect(_:)`, `.disabledDisplays()`
+- Consumes: `Display`, `DisabledDisplayEntry`, `DisplayControlError`, `ConnectionController`
 - Produces:
 ```swift
-public protocol DisplayOperating: Sendable {
-  func snapshot() throws -> [Display]
-  func disabledDisplays() throws -> [DisabledDisplayEntry]
-  func connect(_ uuid: UUID) throws -> Display
-  func disconnect(_ uuid: UUID) throws -> Display
+/// Runs blocking work on one serial DispatchQueue and resumes the caller with the result.
+public final class BlockingExecutor: Sendable {
+  public init(label: String = "displayctl.blocking")
+  public func run<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T
+}
+
+public protocol DisplayOperating: Sendable {   // async; live adapter uses BlockingExecutor
+  func snapshot() async throws -> [Display]
+  func disabledDisplays() async throws -> [DisabledDisplayEntry]
+  func connect(_ uuid: UUID) async throws -> Display
+  func disconnect(_ uuid: UUID) async throws -> Display
+}
+
+public protocol BrightnessOperating: Sendable {  // used from Task 4
+  func percent(for uuid: UUID) async throws -> Int            // resolves the UUID in a fresh snapshot
+  func set(_ percent: Int, for uuid: UUID) async throws        // drops if not online and active
 }
 
 public struct DisplayRow: Equatable, Identifiable, Sendable {
-  public let id: UUID
-  public let name: String
-  public let kind: DisplayKind
-  public let isOn: Bool
-  public let isSwitchEnabled: Bool
-  public let caption: String?       // "Only active display"
-  public let error: String?
-  public let isBusy: Bool
-  public let showsBrightness: Bool  // external, active, ddcCapability != .unsupported
+  public let id: UUID, name: String, kind: DisplayKind
+  public let isOn: Bool, isSwitchEnabled: Bool, isBusy: Bool
+  public let caption: String?, error: String?
+  public let showsBrightness: Bool  // external, online, active, ddcCapability != .unsupported
 }
 
 public enum PanelRows {
@@ -151,43 +170,40 @@ public enum PanelRows {
                           busy: UUID?, errors: [UUID: String]) -> [DisplayRow]
 }
 
-public enum ErrorText {
-  public static func short(_ error: any Error) -> String
-}
+public enum ErrorText { public static func short(_ error: any Error) -> String }
 
 @MainActor @Observable
 public final class PanelModel {
   public init(operations: any DisplayOperating, brightness: any BrightnessOperating)
   public private(set) var rows: [DisplayRow]
-  public private(set) var panelNote: String?   // ledger unreadable
+  public private(set) var panelNote: String?     // ledger note
+  public var safetyNetNote: String?               // set by the app on observer failure
   public private(set) var isBusy: Bool
-  public func refresh() async
+  public func panelOpened() async                  // clears errors, then refresh
+  public func refresh() async                      // keeps errors
   public func setDisplay(_ id: UUID, on: Bool) async
 }
 ```
-`BrightnessOperating` (signature in Task 4) is declared in this task's `DisplayOperating.swift`, so `PanelModel.init` compiles; Task 4 adds its use.
+`ErrorText.short`: `.lastActiveDisplay` → `"Cannot turn off the only active display"`; `.configurationFailed` starting with `"flock timed out"` → busy text; other `DisplayControlError` → its message (fixed short phrase for cases without one); others → `localizedDescription`.
 
-Copy pinned by the design: caption `"Only active display"`; lock timeout `"Busy — another displayctl is running. Try again."`; ledger note `"Saved display list unreadable. Run: displayctl forget all"`. `ErrorText.short` maps `.lastActiveDisplay` → `"Cannot turn off the only active display"`, a `.configurationFailed` whose message starts with `"flock timed out"` → the busy text, any other `DisplayControlError` → its associated message (or a short fixed phrase for cases without one), other errors → `localizedDescription`.
+Ordering rule (design §6.1): every `refresh` and `setDisplay` takes `seq += 1` at start; its result is applied only if `seq > appliedSeq`, then `appliedSeq = seq`.
 
-- [ ] **Step 1: Write the failing `PanelRowsTests`:**
-  - `testBuiltInFirstThenExternalsByName`
-  - `testLedgerOnlyDisplayIsAnOffRow` (UUID in ledger, not in snapshot → `isOn == false`, `isSwitchEnabled == true`)
-  - `testOnlineDisplayWinsOverItsLedgerEntry` (same UUID in both → one row, state from snapshot)
-  - `testOnlyActiveDisplaySwitchDisabledWithCaption` → `isSwitchEnabled == false`, `caption == "Only active display"`
-  - `testAllSwitchesDisabledWhileBusy` and busy row has `isBusy == true`
-  - `testShowsBrightnessOnlyForActiveExternalNotUnsupported`
-- [ ] **Step 2: Write the failing `PanelModelTests`** (fake `DisplayOperating` with scripted results and a gate to hold a call open):
+- [ ] **Step 1: Write failing `PanelRowsTests`:** `testBuiltInFirstThenExternalsByName`, `testLedgerOnlyDisplayIsAnOffRow`, `testOnlineDisplayWinsOverItsLedgerEntry`, `testOnlyActiveDisplaySwitchDisabledWithCaption`, `testAllSwitchesDisabledWhileBusy`, `testShowsBrightnessOnlyForActiveExternalNotUnsupported`.
+- [ ] **Step 2: Write failing `PanelModelTests`** (fake `DisplayOperating` with scripted results and per-call gates):
   - `testRefreshBuildsRows`
-  - `testTurnOffCallsDisconnectThenRefreshes` → calls `[.disconnect(uuid)]`, rows from the post-call snapshot.
-  - `testLockTimeoutShowsBusyTextAndRealState` → `disconnect` throws `.configurationFailed("flock timed out acquiring …")`; row error equals the busy text; `isOn` still true.
-  - `testErrorClearsOnNextSuccess` and `testErrorClearsOnRefreshAfterReopen` (`refresh()` clears errors).
-  - `testSecondClickWhileBusyIsIgnored` → hold the first call at the gate, call `setDisplay` again, release → exactly one controller call.
-  - `testUnreadableLedgerShowsNoteAndOnlineRows` → `disabledDisplays()` throws → `panelNote` equals the ledger note; rows from snapshot.
-  - `testRowDisappearsAfterUnplugDuringOperation` → operation throws, next snapshot lacks the UUID → no row, no error kept for it.
-- [ ] **Step 3:** `swift test --scratch-path .agents-tmp/build --filter DisplayMenuKitTests` → FAIL.
-- [ ] **Step 4:** Implement. `PanelModel` runs controller calls with `Task.detached` (they block on the lock) and awaits the result; `isBusy` guards re-entry.
-- [ ] **Step 5:** Same filter → PASS; full suite → PASS; `swift format lint …` → exit 0.
-- [ ] **Step 6:** Commit: `feat(menu): panel rows and display switching`.
+  - `testTurnOffCallsDisconnectThenRefreshes`
+  - `testLockTimeoutShowsBusyTextAndRealState`
+  - `testErrorClearsOnNextSuccessForThatDisplay`
+  - `testBackgroundRefreshKeepsErrorPanelOpenedClearsIt`
+  - `testSecondClickWhileBusyIsIgnored` → exactly one controller call.
+  - `testStaleRefreshCannotOverwriteNewerOperation` → start refresh A (gated), run `setDisplay` to completion, release A with old data → rows and errors are from the operation.
+  - `testUnreadableLedgerShowsNoteAndOnlineRows` → `panelNote == "Saved display list unreadable. See README › Recovery."`.
+  - `testRowDisappearsAfterUnplugDuringOperation`
+- [ ] **Step 3: Write failing `BlockingExecutorTests`:** `testRunsWorkOffMainThread` (work records `Thread.isMainThread == false`), `testRunsSerially` (two overlapping calls never overlap: an atomic in-flight counter never exceeds 1), `testPropagatesThrow`.
+- [ ] **Step 4:** `swift test --scratch-path .agents-tmp/build --filter DisplayMenuKitTests` → FAIL.
+- [ ] **Step 5:** Implement. `BlockingExecutor` uses `withCheckedThrowingContinuation` + `queue.async`.
+- [ ] **Step 6:** Filter → PASS; full suite → PASS; lint → exit 0.
+- [ ] **Step 7:** Commit: `feat(menu): panel rows, ordered refreshes and display switching`.
 
 ---
 
@@ -199,66 +215,61 @@ Copy pinned by the design: caption `"Only active display"`; lock timeout `"Busy 
 - Test: `Tests/DisplayMenuKitTests/BrightnessCoalescerTests.swift`, `Tests/DisplayMenuKitTests/PanelModelBrightnessTests.swift`
 
 **Interfaces:**
-- Consumes: `DDCBrightnessController.get(display:) -> DDCValue`, `.set(percent:display:)`
+- Consumes: `BrightnessOperating` (Task 3), `PanelModel` rows
 - Produces:
 ```swift
-public protocol BrightnessOperating: Sendable {
-  func percent(for display: Display) async throws -> Int   // current * 100 / maximum, rounded
-  func set(_ percent: Int, for display: Display) async throws
-}
-
-/// At most one write in flight; the newest pending value is written after it; the last submitted value is always written.
+/// One write in flight; newest pending value written after it; last submitted value always written;
+/// after invalidate(), pending values are discarded and late results ignored.
 public actor BrightnessCoalescer {
   public init(write: @escaping @Sendable (Int) async throws -> Void,
               onError: @escaping @Sendable (String?) -> Void)   // nil clears
   public func submit(_ percent: Int)
+  public func invalidate()
 }
 
-extension PanelModel {
-  public func brightness(for id: UUID) -> BrightnessState?
-  public func loadBrightness() async          // reads every row with showsBrightness
-  public func setBrightness(_ percent: Int, for id: UUID)
-}
 public struct BrightnessState: Equatable, Sendable {
   public let percent: Int?      // nil until a read succeeds → label "—"
   public let sliderValue: Int   // last known this run, else 50
   public let error: String?
 }
-```
 
-- [ ] **Step 1: Write the failing `BrightnessCoalescerTests`** (write fake suspends each call until released):
+extension PanelModel {
+  public func brightness(for id: UUID) -> BrightnessState?
+  public func setBrightness(_ percent: Int, for id: UUID)
+}
+```
+`PanelModel` reads brightness for a row when the panel opens and whenever a refresh makes a row newly `showsBrightness`. When a row leaves or stops showing brightness, its coalescer is invalidated and dropped. The live adapter (Task 5) converts `DDCValue` to percent and throws `.ddcInvalidResponse("maximum is 0")` when `maximum == 0`.
+
+- [ ] **Step 1: Write failing `BrightnessCoalescerTests`** (write fake suspends until released):
   - `testFirstValueWrittenImmediately`
-  - `testValuesDuringInFlightWriteCollapseToNewest` → submit 10; while held submit 20, 30; release twice → writes `[10, 30]`.
-  - `testSameValueAfterInFlightIsNotRewritten` → submit 10, submit 10 while held → writes `[10]`.
-  - `testFailedWriteReportsErrorAndNextSubmitWrites` → write throws once; `onError` gets a message; submit 40 → writes include 40 and `onError(nil)`.
-- [ ] **Step 2: Write the failing `PanelModelBrightnessTests`:**
-  - `testLoadReadsOnlyBrightnessRows`
-  - `testOpeningNeverWrites` → after `refresh()` + `loadBrightness()` the fake's set calls are 0.
-  - `testReadFailureShowsDashAndKeepsSliderAtFifty` → `percent == nil`, `sliderValue == 50`, error set.
-  - `testBrightnessStateDroppedWhenDisplayLeaves` → after a refresh without that UUID, `brightness(for:)` is nil.
-- [ ] **Step 3:** Run `--filter DisplayMenuKitTests` → FAIL.
-- [ ] **Step 4:** Implement. One `BrightnessCoalescer` per display UUID, dropped with its row.
-- [ ] **Step 5:** Filter and full suite → PASS; lint → exit 0.
-- [ ] **Step 6:** Commit: `feat(menu): brightness slider model with coalesced DDC writes`.
+  - `testValuesDuringInFlightWriteCollapseToNewest` → writes `[10, 30]`.
+  - `testSameValueAfterInFlightIsNotRewritten` → writes `[10]`.
+  - `testFailedWriteReportsErrorAndNextSubmitWrites`
+  - `testInvalidateDropsPendingAndIgnoresLateResult` → submit 10 (held), submit 20, `invalidate()`, release → writes `[10]` only; no `onError` call after invalidate.
+- [ ] **Step 2: Write failing `PanelModelBrightnessTests`:**
+  - `testOpeningReadsOnlyBrightnessRowsAndNeverWrites`
+  - `testReadFailureShowsDashAndSliderAtFifty`
+  - `testNewlyEligibleRowIsReadWhileOpen` → panel opened, Dell off; refresh turns it on → one read for it.
+  - `testDisplayLeavingInvalidatesPendingWrite` → held write + pending value; refresh without the UUID → no further write; `brightness(for:)` is nil.
+- [ ] **Step 3:** Filter → FAIL. **Step 4:** Implement. **Step 5:** Filter, full suite → PASS; lint → exit 0.
+- [ ] **Step 6:** Commit: `feat(menu): brightness slider with coalesced, invalidatable DDC writes`.
 
 ---
 
 ### Task 5: `displayctl-menu` app
 
 **Files:**
-- Modify: `Package.swift` (executable product `displayctl-menu`, target `DisplayMenuApp` → `DisplayMenuKit`)
-- Create: `Sources/DisplayMenuApp/DisplayMenuApp.swift` (`@main` App, `MenuBarExtra` `.window`, accessory policy), `Sources/DisplayMenuApp/PanelView.swift`, `Sources/DisplayMenuApp/LiveAdapters.swift`, `Sources/DisplayMenuApp/SystemObservers.swift`
+- Modify: `Package.swift` (executable product `displayctl-menu`, target `DisplayMenuApp` → `DisplayMenuKit`); `Sources/DisplayControlCore/DisplayInventory.swift` (`localizedNames` hops to the main thread with `DispatchQueue.main.sync` when `!Thread.isMainThread`)
+- Create: `Sources/DisplayMenuApp/DisplayMenuApp.swift`, `Sources/DisplayMenuApp/PanelView.swift`, `Sources/DisplayMenuApp/LiveAdapters.swift`, `Sources/DisplayMenuApp/SystemObservers.swift`
+- Test: `Tests/DisplayMenuKitTests/LiveBrightnessConversionTests.swift` (percent conversion lives in `DisplayMenuKit` as `BrightnessPercent.from(_ value: DDCValue) throws -> Int`)
 
-**Interfaces:**
-- Consumes: `PanelModel`, `RecoveryScheduler`, `ZeroActiveRecovery`, `ConnectionController`, `DisplayInventory`, `DDCBrightnessController`
-- Produces: the `displayctl-menu` executable.
-
-- [ ] **Step 1:** `LiveDisplayOperations: DisplayOperating` wraps one `ConnectionController(snapshot: DisplayInventory(), hardware: CoreGraphicsDisplayConnectionHardware())`, passing `uuid.uuidString` as the selector. `LiveBrightness: BrightnessOperating` wraps one `DDCBrightnessController()`.
-- [ ] **Step 2:** `SystemObservers` registers `CGDisplayRegisterReconfigurationCallback` and acts only on callbacks without `.beginConfigurationFlag`; it also observes `NSWorkspace.didWakeNotification`. Each event calls `scheduler.trigger()` and `await model.refresh()` on the main actor. On launch it calls `scheduler.trigger()` once.
-- [ ] **Step 3:** `PanelView` per design §6.1–6.2: header "Displays", one row per `DisplayRow` (name, `Toggle(.switch)` disabled per `isSwitchEnabled`, `ProgressView` when `isBusy`, caption and error as secondary text), a `Slider(0...100, step: 1)` with "—"/percent label for `showsBrightness` rows, `panelNote` if set, divider, "Quit" → `exit(0)`. `.onAppear { refresh(); loadBrightness() }`. Icon `display`.
-- [ ] **Step 4:** `swift build -c release --scratch-path .agents-tmp/build` → exit 0; full test suite → PASS; lint → exit 0.
-- [ ] **Step 5:** Run `.agents-tmp/build/release/displayctl-menu` from Terminal with the user: icon shows, panel lists both displays, switches reflect state. Quit.
-- [ ] **Step 6:** Commit: `feat(menu): displayctl-menu app`.
+- [ ] **Step 1: Write failing `LiveBrightnessConversionTests`:** `testRoundsToPercent` (`DDCValue(current: 50, maximum: 200)` → 25), `testZeroMaximumThrows` → `.ddcInvalidResponse("maximum is 0")`. Run → FAIL; implement `BrightnessPercent.from`; run → PASS.
+- [ ] **Step 2:** `LiveAdapters`: one `BlockingExecutor`; `LiveDisplayOperations` wraps one `ConnectionController(snapshot: DisplayInventory(), hardware: CoreGraphicsDisplayConnectionHardware())` with `uuid.uuidString` selectors; `LiveBrightness` resolves the UUID in a fresh `DisplayInventory().snapshot()`, drops if not online and active, then calls `DDCBrightnessController`. The recovery connector and snapshot given to `ZeroActiveRecovery`/`RecoveryScheduler` also go through the executor.
+- [ ] **Step 3:** `SystemObservers`: registers `CGDisplayRegisterReconfigurationCallback` with a context object retained for the process lifetime; the callback ignores begin-flag events and hands the rest to `Task { @MainActor in … }` → `scheduler.trigger(.reconfiguration)` and `model.refresh()`. A non-success `CGError` → log and set `model.safetyNetNote`. `NSWorkspace.shared.notificationCenter` `didWakeNotification` → `trigger(.wake)` + `refresh()`. On launch → `trigger(.launch)`.
+- [ ] **Step 4:** `PanelView` per design §6.1–6.2: header "Displays"; rows (name, `Toggle(.switch)`, `ProgressView` when busy, caption and error as secondary text); `Slider(0...100, step: 1)` with "—"/percent for `showsBrightness` rows; `panelNote` and `safetyNetNote` lines; divider; "Quit" → `exit(0)`. `.onAppear { await model.panelOpened() }`. Icon `display`.
+- [ ] **Step 5:** `swift build -c release --scratch-path .agents-tmp/build` → exit 0; full suite → PASS; lint → exit 0.
+- [ ] **Step 6:** Run `.agents-tmp/build/release/displayctl-menu` with the user: icon shows, panel lists both displays, switches reflect state. Quit.
+- [ ] **Step 7:** Commit: `feat(menu): displayctl-menu app`.
 
 ---
 
@@ -266,12 +277,12 @@ public struct BrightnessState: Equatable, Sendable {
 
 **Files:**
 - Create: `Scripts/install-menu.sh`, `Scripts/uninstall-menu.sh`, `Scripts/com.github.duncandoyle.displayctl-menu.plist` (template; `__BINARY__` replaced at install)
-- Modify: `README.md` (new "Menu bar app" section: install, uninstall, Quit and restart with `launchctl kickstart gui/$(id -u)/com.github.duncandoyle.displayctl-menu`, logs via `log show --predicate 'subsystem == "displayctl"' --last 1h`, recovery)
+- Modify: `README.md` ("Menu bar app": install, uninstall, Quit and restart via `launchctl kickstart gui/$(id -u)/com.github.duncandoyle.displayctl-menu`, logs via `log show --predicate 'subsystem == "displayctl"' --last 1h`; Recovery: how to inspect an unreadable ledger and when `forget all` is safe)
 
-- [ ] **Step 1:** `install-menu.sh` (bash 3.2, `set -euo pipefail`): `swift build -c release`, copy to `~/.local/bin/displayctl-menu`, render the plist into `~/Library/LaunchAgents/`, `launchctl bootout` any old instance (ignore "not loaded"), `launchctl bootstrap gui/$(id -u) <plist>`. Plist keys per design §6.4. If Task 1 needed a bundle, build and install the bundle instead.
-- [ ] **Step 2:** `uninstall-menu.sh`: `bootout`, remove the plist; leave the binary and the ledger.
-- [ ] **Step 3:** `bash -n` both scripts → exit 0; `plutil -lint` the rendered plist → OK.
-- [ ] **Step 4:** Run `Scripts/install-menu.sh`; `launchctl print gui/$(id -u)/com.github.duncandoyle.displayctl-menu` shows `state = running`.
+- [ ] **Step 1:** `install-menu.sh` (bash 3.2, `set -euo pipefail`): release build, copy to `~/.local/bin/displayctl-menu`, render the plist into `~/Library/LaunchAgents/`, `bootout` an old instance (ignore "not loaded"), `bootstrap gui/$(id -u)`. Bundle instead if Task 1 required it.
+- [ ] **Step 2:** `uninstall-menu.sh`: `bootout`, remove the plist; keep the binary and the ledger.
+- [ ] **Step 3:** `bash -n` both → exit 0; `plutil -lint` the rendered plist → OK.
+- [ ] **Step 4:** Run `install-menu.sh`; `launchctl print gui/$(id -u)/com.github.duncandoyle.displayctl-menu` shows `state = running`.
 - [ ] **Step 5:** Commit: `feat(menu): launchd install and docs`.
 
 ---
@@ -279,10 +290,12 @@ public struct BrightnessState: Equatable, Sendable {
 ### Task 7: Hardware validation
 
 **Files:**
+- Create: `Scripts/menu-fallback.sh` (detached fallback: optional `kickstart` at N s, `displayctl connect all` at 30 s, logs to `.agents-tmp/`)
 - Modify: `README.md` (Phase 2 results checklist, dated), `docs/phase-status.md`
 
-- [ ] **Step 1:** With the user, run design §8 hardware steps 1–9 in order. Steps 2–3 and 9 disable a display; the Dell stays attached except in step 9, where replugging it is the recovery.
-- [ ] **Step 2:** For step 7 run `launchctl kill SIGKILL gui/$(id -u)/com.github.duncandoyle.displayctl-menu`; `launchctl print` shows a new PID within 15 s.
-- [ ] **Step 3:** For step 9 also capture `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` into `.agents-tmp/` and quote the outcome line in the README.
-- [ ] **Step 4:** Record each step as observed (date, macOS version) or failed with the evidence. An unrun step is not a pass.
-- [ ] **Step 5:** Commit: `docs: Phase 2 hardware results`.
+- [ ] **Step 1:** Write `menu-fallback.sh`: `nohup`/`setsid`-style detach (as the Phase 1 watchdog), args `--kickstart-after <s>` (optional) and `--connect-all-after 30`, timestamps each action. `bash -n` → exit 0. Dry-run it with the Dell attached and both displays on: it logs a no-op `connect all`.
+- [ ] **Step 2:** With the user, run design §8 hardware steps 1–12 in order. Before steps 9–11, start `menu-fallback.sh`.
+- [ ] **Step 3:** Step 7: `launchctl kill SIGKILL gui/$(id -u)/com.github.duncandoyle.displayctl-menu`; `launchctl print` shows a new PID within 15 s.
+- [ ] **Step 4:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record whether the app (≤ 10 s) or the fallback restored the display.
+- [ ] **Step 5:** Record each step as observed (date, macOS version) or failed with evidence. An unrun step is not a pass.
+- [ ] **Step 6:** Commit: `docs: Phase 2 hardware results`.

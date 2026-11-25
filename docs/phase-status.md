@@ -52,7 +52,7 @@ Design changes beyond D-003 to D-006 without a new decisions.md entry and user a
 none
 
 ## Carry-over (deferred to later phases)
-- none
+- (P4 architecture) Phase 3: shared brightness boundary so keys and slider writes are ordered — src: phases/phase-2/reviews/design-codex.md#11
 
 ## Notes
 - 2026-11-25: Phase 2 (menu bar app, D-009) design started in parallel. Phase 2 base: 7aa83e3c8424d088d1967401da867e6348e6e4b6. No Phase 2 code until Phase 1 closes; this file switches to Phase 2 then.
