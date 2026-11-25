@@ -43,7 +43,8 @@ Design changes beyond D-003 to D-006 without a new decisions.md entry and user a
 - [x] Codex re-review of the fix round — reviews/1.1-fix-codex.md, 4 accepted, 1 rejected (user-confirmed)
 - [x] Fix round 2 for reviews/1.1-fix-codex.md
 - [x] Hardware test with the user on macOS 27 — runs 1–4, HDMI and USB-C; see Notes
-- [ ] Logout/login and a manual `connect all` — user will run later this week
+- [x] Logout/login and a manual `connect all` — logout does not restore (D-008); `connect all` does (2026-11-25)
+- [ ] Decide on a reboot test with a display disabled (D-008 open question)
 - [x] Final Codex review of c324c9c..61333d2 + triage — reviews/1.1-final-codex.md, 5 accepted, 1 rejected
 - [x] Fix round for reviews/1.1-final-codex.md — 159 tests pass (2026-11-23)
 
@@ -56,7 +57,7 @@ none
 ## Notes
 - Build/test: `swift test --parallel --scratch-path .agents-tmp/build` works on this Mac without the `/tmp` cache workaround from the Codex handoff.
 - The Dell's UUID changed since June (`4E3207A4…` → `B3564974…`), likely a different cable/port. Check `list` before every hardware run.
-- Logout/login as a recovery path was never tried in June; worth trying before a reboot if a display wedges again.
+- 2026-11-25, macOS 27.0.1, Dell on HDMI (UUID 4E3207A4…, runtime ID 4): `disconnect internal`, logout, login — built-in display stayed off throughout, Dell stayed on. `connect all` restored it from the ledger (same boot session), exit 0, Dell did not flicker (D-008).
 - 2026-11-23 hardware, macOS 27.0.1, Dell U2720Q on HDMI (UUID 4E3207A4…, runtime ID 5): run 1 found D-005 (disabled display leaves the online list; rollback re-enabled it by recorded ID 1). Run 2: DDC brightness get 30 / set 10 confirmed; internal disconnect verified; app-only trial did not revert (D-006); watchdog `connect all` restored the internal display from the ledger on attempt 1. Logs: ~/Library/Logs/displayctl-hardware-test/run.DqA4Jd, run.U8SMSk.
 - 2026-11-23 run 3 (run.qYsAha): full scripted matrix passed on HDMI — brightness, internal and external round trips (Dell left the online list; restored from the ledger), final-display refusal. Open: unattended run, USB-C, logout/login, manual connect all.
 - 2026-11-23 USB-C (Dell UUID B3564974…, runtime ID 3): reads failed with DDC null messages (`6e 80 be`) until the request was written twice before the read; fixed, live read 25/100. Brightness set over USB-C awaiting user observation.

@@ -46,3 +46,9 @@ Hardware testing does the internal display first (the main use case, with the De
 **Decision:** Before the first push, `git filter-repo` replaced local paths with repo-root links, `~/` paths or placeholders (`<codex-checkout>`, `<codex-worktree>`, `<this checkout>`). Commit SHAs changed. SHAs cited in the docs, including inside reviewer text, were updated mechanically to the new ones; the review text is otherwise unchanged. `main` was fast-forwarded to the Phase 1 branch, and only `main` was pushed. User approved: "Make sure everything is clean before we push", "Keep gmail, push now".
 **Alternatives:** Squashing to one commit (loses the review trail); leaving the paths (exposes local layout).
 **Consequences:** SHAs in earlier chat logs or the original Codex checkout no longer match this repo.
+
+## D-008 — Logout does not undo a disconnect; `connect all` is the recovery path (2026-11-25, phase 1)
+**Context:** On macOS 27.0.1 the user ran `disconnect internal`, then logged out and back in. The built-in display stayed off through both, and the Dell stayed on. Design §6.3 assumed session-scoped changes revert at logout. A manual `connect all` then restored the built-in display from the ledger (same boot session), exit 0, with no flicker on the Dell.
+**Decision:** Logout/login is not a recovery path. Recovery is `connect all`, then a reboot. Supersedes the logout step in D-006's consequences and the recovery boundary in design §6.3.
+**Alternatives:** none — the behaviour is macOS's.
+**Consequences:** Whether a reboot restores a disabled display is unverified. If the disable survived a reboot, the ledger would refuse its entries (they come from an earlier boot), and only another display would keep the Mac usable. Until that is tested, do not reboot or unplug the other display while one is off.

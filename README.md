@@ -36,13 +36,12 @@ displayctl brightness get external       # read the monitor's brightness
 displayctl brightness set external 40    # set it, 0 to 100
 ```
 
-A disconnected display disappears from `list`; `displayctl` remembers it, so `connect internal` still works. The last active display is never turned off. Logging out should restore every display; that is not yet verified on macOS 27.
+A disconnected display disappears from `list`; `displayctl` remembers it, so `connect internal` still works. The last active display is never turned off. Logging out does not bring a display back on macOS 27.
 
 If a screen does not come back:
 
 1. Run `displayctl connect all`.
-2. Log out and back in.
-3. Reboot only as a last resort.
+2. Reboot only as a last resort. Whether a reboot restores the display is not yet verified, so keep another display connected until it is back.
 
 Brightness works over HDMI and USB-C on a Dell U2720Q (macOS 27.0.1). Other monitors need DDC/CI enabled in their own menu.
 
@@ -88,8 +87,8 @@ because Core Graphics inventory is login-session scoped. That is not hardware
 acceptance: interactive validation requires both the internal display and a
 physically connected external display to appear with stable UUIDs.
 
-Connection changes are scoped to the current login session and intentionally
-revert after logout/login. Disconnect refuses to remove the last active display.
+Connection changes use the session configuration scope, but on macOS 27 they
+survive logout/login (D-008). Disconnect refuses to remove the last active display.
 A cross-process lock serializes connection operations so simultaneous CLI
 processes cannot both pass the last-active check against stale state. There is
 no `--force` option.
@@ -128,8 +127,7 @@ If testing is interrupted or a display stays dark, recover in this order:
 
 1. Run `.build/debug/displayctl connect all`, from another terminal if needed. It tries every online inactive display and every ledger entry, and reports each result. It exits nonzero if anything failed, including an unreadable ledger, but it still tries the online displays. Repeat it if another `displayctl` holds the lock.
 2. Check the result with `.build/debug/displayctl list`.
-3. If a display is still missing, log out and log back in. Session-scoped changes revert at logout.
-4. Reboot only if logout and login did not bring it back.
+3. If a display is still missing, reboot. Logout/login does not help (D-008), and reboot recovery is not yet verified.
 
 A remote shell helps only if it can list the GUI session's displays. A headless shell may see none.
 
@@ -160,7 +158,7 @@ Before each disconnect the script starts a detached watchdog. It runs in its own
 2. Internal session-scoped disconnect, screen confirmation, then reconnect by UUID, with the watchdog armed.
 3. Unattended run. This is a separate run of `Scripts/hardware-test.sh`, done after a run that passed steps 1 and 2. Repeat step 1. At step 2, type the `DISCONNECT INTERNAL` line, then withhold the `YES` for the screen confirmation. The watchdog must fire within 20 seconds and restore a usable screen. Firing ends that run. Record the result, then start a fresh run for step 4.
 4. External opt-in, in a fresh run after steps 1 and 2 pass again. You type a separate sentence; anything else skips all external steps.
-5. External session-scoped disconnect and reconnect by UUID, with the watchdog armed. No OS safety net exists here (D-006). If the display does not come back, run `connect all`, then log out and in, then reboot.
+5. External session-scoped disconnect and reconnect by UUID, with the watchdog armed. No OS safety net exists here (D-006). If the display does not come back, run `connect all`, then reboot.
 6. Final-display refusal: each other display is disconnected with its own confirmation, then the script checks that disconnecting the internal display is refused.
 
 USB-C recabling and logout/login stay manual.
@@ -180,10 +178,11 @@ Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun c
 - [x] External disconnect and reconnect over HDMI: the Dell left the online list and `connect <uuid>` restored it from the ledger — observed 2026-11-23 (macOS 27.0.1). Claim support only if recovery of a display that macOS dropped from the online list was observed; otherwise record it as unsupported (D-006).
 - [x] Disconnecting the final active display is refused with a nonzero exit — observed 2026-11-23 (macOS 27.0.1).
 - [x] USB-C: brightness get and set work once DDC requests are sent twice; disconnect and reconnect of the Dell work — observed 2026-11-23 (macOS 27.0.1).
-- [ ] Logout/login restores session-scoped connection state.
-- [ ] Manual `displayctl connect all` restores available displays.
+- [x] Logout/login does not restore a disabled display: the built-in display stayed off through logout and login (D-008) — observed 2026-11-25 (macOS 27.0.1).
+- [x] Manual `displayctl connect all` restored the built-in display from the ledger after that login, exit 0 — observed 2026-11-25 (macOS 27.0.1).
+- [ ] Reboot with a display disabled — not yet tested.
 
-After the scripted steps, reconnect the monitor over USB-C, run `list`, then `brightness get` and a carefully confirmed `brightness set`. Record supported or unsupported; there is no fallback. Then test logout/login and run `connect all` once by hand.
+After the scripted steps, reconnect the monitor over USB-C, run `list`, then `brightness get` and a carefully confirmed `brightness set`. Record supported or unsupported; there is no fallback. Then disconnect the internal display, log out and back in, and run `connect all` once by hand.
 
 ### History: macOS 26.5, 2026-06-30
 

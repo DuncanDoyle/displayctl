@@ -322,8 +322,7 @@ print_recovery_help() {
 RECOVERY NEEDED: not every display that was active came back.
   1. Run: "$DISPLAYCTL" connect all   (repeat it; another displayctl may hold the lock)
   2. Check: "$DISPLAYCTL" list
-  3. Still missing? Log out and back in; session-scoped changes revert at logout.
-  4. Reboot only if logout/login does not restore it.
+  3. Still missing? Reboot. Logout/login does not restore it on macOS 27.
 Logs: $RUN_DIR
 EOF
 }
@@ -626,7 +625,7 @@ echo "Internal display steps passed."
 # Step 2: external steps, only after the internal pass and a separate opt-in.
 echo ""
 echo "The external steps disable the external display. Only the watchdog and the ledger bring it back."
-echo "If they fail, recover with connect all, then logout/login, then a reboot."
+echo "If they fail, recover with connect all, then a reboot."
 echo "Type exactly the line below to run them; anything else skips them."
 echo "I OPT IN TO EXTERNAL DISPLAY DISCONNECT TESTS"
 if ! ask "$PROMPT_TIMEOUT" || [[ "$ANSWER" != "I OPT IN TO EXTERNAL DISPLAY DISCONNECT TESTS" ]]; then
@@ -685,6 +684,6 @@ echo "Scripted sequence complete. Results count only where you typed YES."
 echo "Manual checks still required:"
 echo "1. Re-cable the external monitor over USB-C; run list, brightness get, and a"
 echo "   carefully confirmed brightness set. Record supported or unsupported."
-echo "2. Soft-disconnect a non-final display, log out and back in, and verify the"
-echo "   session-scoped state recovers."
+echo "2. Disconnect the internal display, log out and back in, and record whether"
+echo "   it came back (on macOS 27 it does not)."
 echo "3. Run '$DISPLAYCTL connect all' manually and visually verify recovery."

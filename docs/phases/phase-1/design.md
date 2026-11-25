@@ -138,7 +138,7 @@ Connection changes use this sequence:
 9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005).
 10. Release the display-operation lock.
 
-If configuration fails before completion, the transaction is cancelled. Session-scoped changes intentionally revert after logout/login, providing a recovery boundary without requiring a long-running process.
+If configuration fails before completion, the transaction is cancelled. On macOS 27 a session-scoped disable survives logout/login, so logout is not a recovery boundary (D-008). Recovery is `displayctl connect all` from the ledger; whether a reboot restores the display is unverified.
 
 The operation lock uses Darwin `flock` on a lock file in the logged-in user's temporary directory. It serializes the complete validation and mutation sequence across threads, controller instances, and CLI processes. Acquisition uses bounded waiting and fails clearly rather than hanging indefinitely. The operating system releases the advisory lock when a process exits or crashes.
 
@@ -283,13 +283,13 @@ The M5/Tahoe 26.5 validation matrix includes:
 5. With the external display active, disconnect and reconnect the internal display.
 6. Verify refusal to disconnect the final active display.
 7. Run the DDC checks over USB-C and record supported or unsupported status.
-8. Verify logout/login recovery for session-scoped display configuration.
+8. Check whether logout/login restores a disabled display. On macOS 27 it does not (D-008).
 
 The hardware test starts with the internal display. The external display follows only after a separate opt-in (D-006).
 
 Before each session-scoped disconnect, the hardware test arms a watchdog that runs detached from the test's foreground flow, so it fires even when the user cannot type. The watchdog runs the disconnect as its own child, so it knows when the change has finished and can stop it at a deadline. Once it fires, no further disconnect runs in that test. It stays armed until the test has restored and verified the original set of active displays. If the user has not confirmed within the timeout (default 20 s), it retries `displayctl connect all` until that set is active again or a hard deadline passes, and the test stops; another disconnect needs a fresh opt-in. The internal display is tested before the external one, and every external disable, including test setup, needs the internal pass and an explicit opt-in (D-003, D-004).
 
-Tests must restore the initial display state when possible. Failures must print manual recovery instructions, including `displayctl connect all` and logout/login.
+Tests must restore the initial display state when possible. Failures must print manual recovery instructions, led by `displayctl connect all` (D-008).
 
 ## 10. Phase Roadmap
 

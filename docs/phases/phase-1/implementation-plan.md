@@ -582,7 +582,7 @@ git commit -m "feat: expose display control CLI"
 
 - [ ] **Step 1: Write the hardware-test contract before the script**
 
-Document these required checks in `README.md`: build, automated test, list, HDMI brightness get, visually confirmed HDMI brightness set, external disconnect/reconnect, internal disconnect/reconnect, final-display refusal, USB-C brightness result, logout/login recovery, and `connect all` recovery.
+Document these required checks in `README.md`: build, automated test, list, HDMI brightness get, visually confirmed HDMI brightness set, external disconnect/reconnect, internal disconnect/reconnect, final-display refusal, USB-C brightness result, logout/login behaviour (D-008), and `connect all` recovery.
 
 - [ ] **Step 2: Verify documented commands against CLI help behavior**
 
