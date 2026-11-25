@@ -56,6 +56,7 @@ none
 
 ## Notes
 - 2026-11-25: Phase 2 (menu bar app, D-009) design started in parallel. Phase 2 base: 7aa83e3c8424d088d1967401da867e6348e6e4b6. No Phase 2 code until Phase 1 closes; this file switches to Phase 2 then.
+- 2026-11-25: Phase 2 design + plan reviewed twice by Codex (reviews/design-codex.md, design2-codex.md), triaged. The loop stopped with P2 findings resolved on paper but not re-reviewed, by owner decision ("Stop design reviews here?" → "yes"); the Phase 2 code review must check them. Design and plan await owner approval of the amended versions before implementation.
 - Build/test: `swift test --parallel --scratch-path .agents-tmp/build` works on this Mac without the `/tmp` cache workaround from the Codex handoff.
 - The Dell's UUID changed since June (`4E3207A4…` → `B3564974…`), likely a different cable/port. Check `list` before every hardware run.
 - 2026-11-25, macOS 27.0.1, Dell on HDMI (UUID 4E3207A4…, runtime ID 4): `disconnect internal`, logout, login — built-in display stayed off throughout, Dell stayed on. `connect all` restored it from the ledger (same boot session), exit 0, Dell did not flicker (D-008).
