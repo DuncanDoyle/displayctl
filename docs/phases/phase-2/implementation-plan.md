@@ -60,7 +60,7 @@ Throwaway. Answers design §9's open question before the real target exists.
 - Test: `Tests/DisplayControlCoreTests/ConnectionControllerTests.swift`, `Tests/DisplayControlCoreTests/ZeroActiveRecoveryTests.swift`
 
 **Interfaces:**
-- Consumes: `DisplaySnapshotProviding`, `DisplayConnectionOutcome`, existing `connectAll` body
+- Consumes: `DisplayConnectionOutcome`, existing `connectAll` body
 - Produces:
 ```swift
 extension ConnectionController {
@@ -68,61 +68,68 @@ extension ConnectionController {
   public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]?
 }
 
+// Async boundaries: the app backs them with the serial executor (Task 3/5); tests use fakes.
 public protocol RecoveryConnecting: Sendable {
-  func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]?
+  func recoverIfNoneActive() async throws -> [DisplayConnectionOutcome]?
 }
-extension ConnectionController: RecoveryConnecting {}
+public protocol DisplaySampling: Sendable {
+  func snapshot() async throws -> [Display]
+}
 
 public enum RecoveryOutcome: Equatable, Sendable {
   case displayActive               // nothing done
   case recovered(attempts: Int)    // a snapshot shows an active display afterwards
   case failed(attempts: Int)       // still none active after maxAttempts
-  case snapshotUnavailable         // maxSnapshotAttempts samples all threw
+  case inconclusive                // 5 inconsistent samples in this episode
 }
 
 public struct ZeroActiveRecovery: Sendable {
-  public init(snapshot: any DisplaySnapshotProviding, connector: any RecoveryConnecting,
+  public init(sampler: any DisplaySampling, connector: any RecoveryConnecting,
               sleep: @escaping @Sendable (Duration) async -> Void,
               retryDelay: Duration = .seconds(2), maxAttempts: Int = 3,
-              maxSnapshotAttempts: Int = 5,
+              maxInconsistentSamples: Int = 5,
               log: @escaping @Sendable (String) -> Void = { _ in })
-  public func run() async -> RecoveryOutcome
+  public func run(trigger: RecoveryTrigger) async -> RecoveryOutcome
 }
 
-public enum RecoveryTrigger: Sendable { case launch, reconfiguration, wake }
+public enum RecoveryTrigger: String, Sendable { case launch, reconfiguration, wake }
 
-/// Debounces triggers (settle), runs one episode at a time, and enforces the episode rule:
-/// after .failed or .snapshotUnavailable, only .wake or a snapshot with an active display re-arms it.
+/// Debounces triggers (settle), runs one episode at a time, drops triggers during an episode.
+/// After .failed only .wake, or a .reconfiguration with activeCount() > 0, re-arms it.
 public actor RecoveryScheduler {
-  public init(recovery: ZeroActiveRecovery, snapshot: any DisplaySnapshotProviding,
+  public init(recovery: ZeroActiveRecovery,
+              activeCount: @escaping @Sendable () async -> Int,   // CGGetActiveDisplayList count
               settle: Duration = .seconds(2),
               sleep: @escaping @Sendable (Duration) async throws -> Void,
               onOutcome: @escaping @Sendable (RecoveryOutcome) -> Void = { _ in })
   public func trigger(_ trigger: RecoveryTrigger)
 }
 ```
-`ZeroActiveRecovery` and `RecoveryScheduler` call the blocking connector and snapshot through the caller-supplied types; the app wraps them in the serial executor (Task 3), tests use fakes.
+An inconsistent-sample error is `.configurationFailed` whose message contains `"changed while sampling"`, from either the connector or the sampler; it is resampled after `retryDelay` and does not count as an attempt.
 
 - [ ] **Step 1: Write failing `ConnectionControllerTests`** (existing `FakeDisplayStore`, `makeController`):
   - `testRecoverIfNoneActiveReturnsNilWhenADisplayIsActive` → `nil`, no hardware requests.
   - `testRecoverIfNoneActiveEnablesLedgerAndOnlineInactiveAtZero` → outcomes for each; requests enable both.
   - `testRecoverAfterCLIConnectWinsLockEnablesNothing` → the fake lock runs a `connect("1")` first (store now has 1 active), then the recovery body → `nil`; display 2 stays inactive.
-- [ ] **Step 2: Write failing `ZeroActiveRecoveryTests`** (fakes: `ScriptedSnapshot` with queued `[Display]` or errors; `FakeConnector` with scripted returns/throws and a call count; `ManualSleeper` recording durations and suspending until `advance()`):
+- [ ] **Step 2: Write failing `ZeroActiveRecoveryTests`** (fakes: `ScriptedSampler` with queued `[Display]` or errors; `FakeConnector` with scripted returns/throws and a call count; `ManualSleeper` recording durations and suspending until `advance()`):
   - `testDisplayActiveWhenConnectorReturnsNil` → `.displayActive`.
   - `testRecoveredWhenSnapshotShowsActiveAfterAttempt` → `.recovered(attempts: 1)`.
   - `testReturnedFailuresAreLoggedIncludingLedgerOutcome` → connector returns `[failure(.recoverySkipped("earlier boot")), DisplayConnectionOutcome(display: nil, result: .failure(.configurationFailed("ledger unreadable")))]` → log lines contain `"earlier boot"` and `"ledger unreadable"`.
   - `testPartialRecoveryCountsAsRecovered` → one success, one failure, snapshot shows active → `.recovered(attempts: 1)`, failure logged.
   - `testLockTimeoutCountsAsFailedAttemptAndRetries` → throws `.configurationFailed("flock timed out …")` twice then succeeds → `.recovered(attempts: 3)`, sleeps `[.seconds(2), .seconds(2)]`.
   - `testGivesUpAfterMaxAttempts` → `.failed(attempts: 3)`, connector calls 3.
-  - `testInconsistentSnapshotResampledAfterDelay` → snapshot throws `"Display inventory changed while sampling; retry"` twice, then shows active → `.recovered`, sleeps include two `.seconds(2)`.
-  - `testSnapshotUnavailableAfterFiveSamples` → `.snapshotUnavailable`.
+  - `testInconsistentSampleFromVerificationIsNotAnAttempt` → sampler throws `"Display inventory changed while sampling; retry"` twice, then shows active → `.recovered(attempts: 1)`, sleeps include two `.seconds(2)`.
+  - `testInconsistentSampleFromLockedCheckIsNotAnAttempt` → connector throws the same error twice, then returns outcomes and the sampler shows active → `.recovered(attempts: 1)`.
+  - `testInconclusiveAfterFiveInconsistentSamples` → `.inconclusive`.
 - [ ] **Step 3: Write failing `RecoverySchedulerTests`** (same file):
   - `testTriggersInSettleWindowCoalesce` → three triggers → one run.
-  - `testTriggerDuringRunSchedulesOneMore` → exactly two runs.
-  - `testFailedEpisodeIgnoresReconfigurationTriggers` → episode `.failed`; then `.reconfiguration` while still zero active → no run.
+  - `testTriggerDuringRunIsDropped` → a trigger while the run is held → exactly one run.
+  - `testFailedEnableEmittingCallbackDuringRunStillEnds` → each connector call emits `trigger(.reconfiguration)` before returning failure, `activeCount` stays 0 → one run, `.failed(attempts: 3)`, no further run.
+  - `testFailedEpisodeIgnoresReconfigurationWhileZeroActive` → after `.failed`, `.reconfiguration` with `activeCount == 0` → no run.
   - `testFailedEpisodeRearmsOnWake` → `.wake` → one new run.
-  - `testFailedEpisodeRearmsAfterActiveSnapshot` → `.reconfiguration` with a snapshot showing active → re-armed; a later zero-active trigger runs.
-- [ ] **Step 4:** `swift test --scratch-path .agents-tmp/build --filter "ZeroActiveRecoveryTests|ConnectionControllerTests"` → the new tests FAIL.
+  - `testFailedEpisodeRearmsWhenActiveCountAboveZero` → `.reconfiguration` with `activeCount == 1` → re-armed; a later zero-active `.reconfiguration` runs.
+  - `testInconclusiveDoesNotDisarm` → after `.inconclusive`, the next `.reconfiguration` runs.
+- [ ] **Step 4:** `swift test --scratch-path .agents-tmp/build --filter "ZeroActiveRecoveryTests|RecoverySchedulerTests|ConnectionControllerTests"` → the new tests FAIL.
 - [ ] **Step 5:** Implement. Active means `isOnline && isActive`. A thrown connector error is logged and counts as an attempt.
 - [ ] **Step 6:** Filter → PASS; full `swift test --parallel --scratch-path .agents-tmp/build` → PASS; lint → exit 0.
 - [ ] **Step 7:** Commit: `feat(core): zero-active-display recovery under the operation lock`.
@@ -186,7 +193,7 @@ public final class PanelModel {
 ```
 `ErrorText.short`: `.lastActiveDisplay` → `"Cannot turn off the only active display"`; `.configurationFailed` starting with `"flock timed out"` → busy text; other `DisplayControlError` → its message (fixed short phrase for cases without one); others → `localizedDescription`.
 
-Ordering rule (design §6.1): every `refresh` and `setDisplay` takes `seq += 1` at start; its result is applied only if `seq > appliedSeq`, then `appliedSeq = seq`.
+Ordering rule (design §6.1): every snapshot request (a `refresh`, or the snapshot at the end of `setDisplay`) takes `seq += 1` when issued; it is published to `rows` only if `seq > publishedSeq`, then `publishedSeq = seq`. `setDisplay` sets its row's busy flag and error when it finishes, regardless of `seq`. `PanelModel` also has `public func panelClosed()`; `panelOpened()` and `panelClosed()` set `isOpen`.
 
 - [ ] **Step 1: Write failing `PanelRowsTests`:** `testBuiltInFirstThenExternalsByName`, `testLedgerOnlyDisplayIsAnOffRow`, `testOnlineDisplayWinsOverItsLedgerEntry`, `testOnlyActiveDisplaySwitchDisabledWithCaption`, `testAllSwitchesDisabledWhileBusy`, `testShowsBrightnessOnlyForActiveExternalNotUnsupported`.
 - [ ] **Step 2: Write failing `PanelModelTests`** (fake `DisplayOperating` with scripted results and per-call gates):
@@ -197,6 +204,7 @@ Ordering rule (design §6.1): every `refresh` and `setDisplay` takes `seq += 1` 
   - `testBackgroundRefreshKeepsErrorPanelOpenedClearsIt`
   - `testSecondClickWhileBusyIsIgnored` → exactly one controller call.
   - `testStaleRefreshCannotOverwriteNewerOperation` → start refresh A (gated), run `setDisplay` to completion, release A with old data → rows and errors are from the operation.
+  - `testNewerRefreshDoesNotDropFailedSwitchError` → `setDisplay` gated inside `disconnect`; a refresh publishes; release `disconnect` with a postcondition failure → row error set, busy cleared.
   - `testUnreadableLedgerShowsNoteAndOnlineRows` → `panelNote == "Saved display list unreadable. See README › Recovery."`.
   - `testRowDisappearsAfterUnplugDuringOperation`
 - [ ] **Step 3: Write failing `BlockingExecutorTests`:** `testRunsWorkOffMainThread` (work records `Thread.isMainThread == false`), `testRunsSerially` (two overlapping calls never overlap: an atomic in-flight counter never exceeds 1), `testPropagatesThrow`.
@@ -220,7 +228,8 @@ Ordering rule (design §6.1): every `refresh` and `setDisplay` takes `seq += 1` 
 ```swift
 /// One write in flight; newest pending value written after it; last submitted value always written;
 /// after invalidate(), pending values are discarded and late results ignored.
-public actor BrightnessCoalescer {
+/// Main-actor isolated so slider values arrive in order through synchronous submit().
+@MainActor public final class BrightnessCoalescer {
   public init(write: @escaping @Sendable (Int) async throws -> Void,
               onError: @escaping @Sendable (String?) -> Void)   // nil clears
   public func submit(_ percent: Int)
@@ -238,7 +247,7 @@ extension PanelModel {
   public func setBrightness(_ percent: Int, for id: UUID)
 }
 ```
-`PanelModel` reads brightness for a row when the panel opens and whenever a refresh makes a row newly `showsBrightness`. When a row leaves or stops showing brightness, its coalescer is invalidated and dropped. The live adapter (Task 5) converts `DDCValue` to percent and throws `.ddcInvalidResponse("maximum is 0")` when `maximum == 0`.
+`PanelModel` reads brightness for every eligible row in `panelOpened()`, and, while `isOpen`, whenever a refresh makes a row newly `showsBrightness`. No reads while closed. When a row leaves or stops showing brightness, its coalescer is invalidated and dropped. The live adapter (Task 5) converts `DDCValue` to percent and throws `.ddcInvalidResponse("maximum is 0")` when `maximum == 0`.
 
 - [ ] **Step 1: Write failing `BrightnessCoalescerTests`** (write fake suspends until released):
   - `testFirstValueWrittenImmediately`
@@ -250,6 +259,8 @@ extension PanelModel {
   - `testOpeningReadsOnlyBrightnessRowsAndNeverWrites`
   - `testReadFailureShowsDashAndSliderAtFifty`
   - `testNewlyEligibleRowIsReadWhileOpen` → panel opened, Dell off; refresh turns it on → one read for it.
+  - `testRowEligibleWhileClosedIsReadOnReopen` → `panelClosed()`, refresh turns the Dell on → 0 reads; `panelOpened()` → 1 read.
+  - `testReleasedValueWinsThroughModel` → `setBrightness` 10 (write held), 20, 30, 45 from the main actor; release → last write is 45.
   - `testDisplayLeavingInvalidatesPendingWrite` → held write + pending value; refresh without the UUID → no further write; `brightness(for:)` is nil.
 - [ ] **Step 3:** Filter → FAIL. **Step 4:** Implement. **Step 5:** Filter, full suite → PASS; lint → exit 0.
 - [ ] **Step 6:** Commit: `feat(menu): brightness slider with coalesced, invalidatable DDC writes`.
@@ -264,9 +275,9 @@ extension PanelModel {
 - Test: `Tests/DisplayMenuKitTests/LiveBrightnessConversionTests.swift` (percent conversion lives in `DisplayMenuKit` as `BrightnessPercent.from(_ value: DDCValue) throws -> Int`)
 
 - [ ] **Step 1: Write failing `LiveBrightnessConversionTests`:** `testRoundsToPercent` (`DDCValue(current: 50, maximum: 200)` → 25), `testZeroMaximumThrows` → `.ddcInvalidResponse("maximum is 0")`. Run → FAIL; implement `BrightnessPercent.from`; run → PASS.
-- [ ] **Step 2:** `LiveAdapters`: one `BlockingExecutor`; `LiveDisplayOperations` wraps one `ConnectionController(snapshot: DisplayInventory(), hardware: CoreGraphicsDisplayConnectionHardware())` with `uuid.uuidString` selectors; `LiveBrightness` resolves the UUID in a fresh `DisplayInventory().snapshot()`, drops if not online and active, then calls `DDCBrightnessController`. The recovery connector and snapshot given to `ZeroActiveRecovery`/`RecoveryScheduler` also go through the executor.
+- [ ] **Step 2:** `LiveAdapters`: one `BlockingExecutor`; `LiveDisplayOperations` wraps one `ConnectionController(snapshot: DisplayInventory(), hardware: CoreGraphicsDisplayConnectionHardware())` with `uuid.uuidString` selectors; `LiveBrightness` resolves the UUID in a fresh snapshot through the executor, drops if not online and active, then awaits `DDCBrightnessController` (its actor, design §5). `LiveRecoveryConnector: RecoveryConnecting` and `LiveSampler: DisplaySampling` wrap the controller and inventory through the executor; `activeCount` calls `CGGetActiveDisplayList` directly.
 - [ ] **Step 3:** `SystemObservers`: registers `CGDisplayRegisterReconfigurationCallback` with a context object retained for the process lifetime; the callback ignores begin-flag events and hands the rest to `Task { @MainActor in … }` → `scheduler.trigger(.reconfiguration)` and `model.refresh()`. A non-success `CGError` → log and set `model.safetyNetNote`. `NSWorkspace.shared.notificationCenter` `didWakeNotification` → `trigger(.wake)` + `refresh()`. On launch → `trigger(.launch)`.
-- [ ] **Step 4:** `PanelView` per design §6.1–6.2: header "Displays"; rows (name, `Toggle(.switch)`, `ProgressView` when busy, caption and error as secondary text); `Slider(0...100, step: 1)` with "—"/percent for `showsBrightness` rows; `panelNote` and `safetyNetNote` lines; divider; "Quit" → `exit(0)`. `.onAppear { await model.panelOpened() }`. Icon `display`.
+- [ ] **Step 4:** `PanelView` per design §6.1–6.2: header "Displays"; rows (name, `Toggle(.switch)`, `ProgressView` when busy, caption and error as secondary text); `Slider(0...100, step: 1)` with "—"/percent for `showsBrightness` rows; `panelNote` and `safetyNetNote` lines; divider; "Quit" → `exit(0)`. `.onAppear { await model.panelOpened() }`, `.onDisappear { model.panelClosed() }`; the slider calls `model.setBrightness` synchronously. Icon `display`.
 - [ ] **Step 5:** `swift build -c release --scratch-path .agents-tmp/build` → exit 0; full suite → PASS; lint → exit 0.
 - [ ] **Step 6:** Run `.agents-tmp/build/release/displayctl-menu` with the user: icon shows, panel lists both displays, switches reflect state. Quit.
 - [ ] **Step 7:** Commit: `feat(menu): displayctl-menu app`.
@@ -290,12 +301,13 @@ extension PanelModel {
 ### Task 7: Hardware validation
 
 **Files:**
-- Create: `Scripts/menu-fallback.sh` (detached fallback: optional `kickstart` at N s, `displayctl connect all` at 30 s, logs to `.agents-tmp/`)
+- Create: `Scripts/menu-fallback.sh` (detached fallback with the Phase 1 watchdog's guarantees: confirms it started, optional `kickstart` at N s, from 30 s retries `connect all` until `list` shows an active display or 90 s pass; logs to `.agents-tmp/`)
 - Modify: `README.md` (Phase 2 results checklist, dated), `docs/phase-status.md`
 
-- [ ] **Step 1:** Write `menu-fallback.sh`: `nohup`/`setsid`-style detach (as the Phase 1 watchdog), args `--kickstart-after <s>` (optional) and `--connect-all-after 30`, timestamps each action. `bash -n` → exit 0. Dry-run it with the Dell attached and both displays on: it logs a no-op `connect all`.
-- [ ] **Step 2:** With the user, run design §8 hardware steps 1–12 in order. Before steps 9–11, start `menu-fallback.sh`.
-- [ ] **Step 3:** Step 7: `launchctl kill SIGKILL gui/$(id -u)/com.github.duncandoyle.displayctl-menu`; `launchctl print` shows a new PID within 15 s.
-- [ ] **Step 4:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record whether the app (≤ 10 s) or the fallback restored the display.
-- [ ] **Step 5:** Record each step as observed (date, macOS version) or failed with evidence. An unrun step is not a pass.
-- [ ] **Step 6:** Commit: `docs: Phase 2 hardware results`.
+- [ ] **Step 1:** Write `menu-fallback.sh`, reusing the detach and retry approach of `Scripts/hardware-test.sh`'s watchdog: args `--kickstart-after <s>` (optional), `--connect-all-after 30`, `--deadline 90`; prints a ready line once detached; timestamps each action; exits once a display is active or at the deadline. `bash -n` → exit 0.
+- [ ] **Step 2:** Prove the fallback: app stopped, Dell attached, `displayctl disconnect internal`, start the fallback → it restores the built-in display from the ledger, logged. Only then run zero-active steps.
+- [ ] **Step 3:** With the user, run design §8 hardware steps 1–12 in order, with each step's stated preconditions. Before steps 9–11, start `menu-fallback.sh` (step 10: once the screen is dark, with `--kickstart-after 5`).
+- [ ] **Step 4:** Step 7: `launchctl kill SIGKILL gui/$(id -u)/com.github.duncandoyle.displayctl-menu`; `launchctl print` shows a new PID within 15 s.
+- [ ] **Step 5:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record whether the app (≤ 10 s) or the fallback restored the display.
+- [ ] **Step 6:** Record each step as observed (date, macOS version) or failed with evidence. An unrun step is not a pass.
+- [ ] **Step 7:** Commit: `docs: Phase 2 hardware results`.
