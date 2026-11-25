@@ -1,6 +1,6 @@
 # displayctl — Roadmap
 
-**Last updated:** 2026-11-23
+**Last updated:** 2026-11-25
 Program: none
 Advisor: none
 
@@ -15,17 +15,17 @@ A small, self-contained macOS tool with the core of BetterDisplay that the owner
 
 A `displayctl` CLI that lists displays, connects/disconnects them safely, and gets/sets external DDC brightness, validated on real hardware.
 
-### Phase 2 — Keyboard brightness agent
-**Status:** Not started
-**Docs:** `docs/phases/phase-2/` (not yet written)
+### Phase 2 — Menu bar app (D-009)
+**Status:** Design in progress (no code until Phase 1 closes)
+**Docs:** `docs/phases/phase-2/`
 
-Brightness keys adjust the display under the mouse pointer, and a background agent reconnects soft-disconnected displays when no active display remains. See design.md §10.2.
+A menu bar panel with an on/off switch per display and a DDC brightness slider for external displays. It runs as a launchd agent and turns disabled displays back on when no display is active.
 
-### Phase 3 — Menu-bar application
+### Phase 3 — Keyboard brightness keys (D-009)
 **Status:** Not started
 **Docs:** `docs/phases/phase-3/` (not yet written)
 
-Native menu-bar UI for per-display connect/disconnect and brightness. See design.md §10.3.
+Brightness keys adjust the display under the mouse pointer. Likely added to the Phase 2 app's process. See Phase 1 design.md §10.2, minus the recovery part, which moved to Phase 2.
 
 ## Deferred / out of roadmap
 - Internal display brightness control — not in the approved design; macOS keys already handle it. Revisit if Phase 3 wants a single slider for all displays.
