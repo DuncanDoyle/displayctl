@@ -3,7 +3,7 @@
 ## 1. Status
 
 - Phase: 2 — Menu bar app (D-009)
-- Status: Draft, awaiting user approval and Codex review
+- Status: Approved by the owner 2026-11-26 (after Codex reviews design-codex.md, design2-codex.md)
 - Platform: Apple Silicon Mac, macOS 27.0.1 (D-002)
 - Language: Swift, SwiftUI and AppKit; no new third-party dependencies
 - Builds on: `DisplayControlCore` from Phase 1, unchanged except for the additions in §5

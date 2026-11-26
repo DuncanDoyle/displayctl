@@ -16,7 +16,7 @@ A small, self-contained macOS tool with the core of BetterDisplay that the owner
 A `displayctl` CLI that lists displays, connects/disconnects them safely, and gets/sets external DDC brightness, validated on real hardware.
 
 ### Phase 2 — Menu bar app (D-009)
-**Status:** Design and plan reviewed; awaiting owner approval of the amended versions
+**Status:** In progress (implementing)
 **Docs:** `docs/phases/phase-2/`
 
 A menu bar panel with an on/off switch per display and a DDC brightness slider for external displays. It runs as a launchd agent and turns disabled displays back on when no display is active.

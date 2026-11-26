@@ -6,11 +6,11 @@ Base: 860cbeab7e5656e8984eea68250c1bf4e6248436 (code; Phase 2 design docs began 
 Author: anthropic (claude-opus-5-5)
 Advisory: none
 Docs: docs/phases/phase-2/
-Status: design and plan reviewed; awaiting owner approval of the amended versions before any code
+Status: implementing on branch duncandoyle/menuBar (executing-plans, Claude implements; Codex reviews)
 
 ### Queue
-- [ ] Q0 Owner approves the amended design.md and implementation-plan.md ← CURRENT
-- [ ] Q1 Task 1 spike: MenuBarExtra from a bare executable under launchd
+- [x] Q0 Owner approves the amended design.md and implementation-plan.md — "Approved" (2026-11-26)
+- [ ] Q1 Task 1 spike: MenuBarExtra from a bare executable under launchd ← CURRENT
 - [ ] Q2 (P4 architecture) Measure snapshot and brightness-set cost (I/O Registry walks) before the slider relies on them — src: phases/phase-1/reviews/design-claude.md#10, phase-claude.md#4
 - [ ] Q3 Task 2 safety net in DisplayControlCore
 - [ ] Q4 Task 3 DisplayMenuKit executor, rows, switching
