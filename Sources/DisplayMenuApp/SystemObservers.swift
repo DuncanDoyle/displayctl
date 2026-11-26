@@ -75,10 +75,8 @@ final class SystemObservers {
 
   /// Reopens the ledger watch and reloads the gate; runs at launch and on wake.
   private func refreshLedgerWatch() {
-    let directory = DisplayControlState.defaultDirectory
-    try? FileManager.default.createDirectory(
-      at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     if !ledgerWatcher.restart() {
+      let directory = DisplayControlState.defaultDirectory
       logger.error("cannot watch \(directory.path, privacy: .public): errno \(errno)")
     }
     reloadGate()

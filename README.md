@@ -242,8 +242,8 @@ The steps are in `docs/phases/phase-2/design.md` §8. All were observed on 2026-
 - [x] 10: startup recovery. `kickstart` ran 5 s after the screen went dark; the app recovered by its `launch` trigger, and the built-in was back 9 s after dark.
 - [x] 11: wake recovery, passed by another route. The app's enable attempts with the lid closed failed, because the panel cannot light with the lid shut, but they left it enabled. macOS lit it when the lid opened, and the wake check found it active.
 - [ ] 9 over HDMI. Not yet run.
-- [ ] 9b: periodic check alone (D-014, events off with `DISPLAYCTL_MENU_NO_EVENTS=1`). Not yet run.
-- [ ] 12: login, the icon appears without a manual start. Not yet run.
+- [x] 9b: periodic check alone (D-014), with display, wake and launch triggers off (`DISPLAYCTL_MENU_NO_EVENTS=1`). The log shows an episode started by `tick`; the built-in was back within 1 s of going dark, because a check happened to run right then.
+- [x] 12: after logout and login, the icon appeared without a manual start.
 
 ### History: macOS 26.5, 2026-06-30
 

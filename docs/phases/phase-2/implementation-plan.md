@@ -310,8 +310,8 @@ extension PanelModel {
 
 - [ ] **Step 1:** Write `menu-fallback.sh`, reusing the detach and retry approach of `Scripts/hardware-test.sh`'s watchdog: args `--kickstart-after <s>` (optional), `--connect-all-after 30`, `--deadline 90`; prints a ready line once detached; timestamps each action; exits once a display is active or at the deadline. `bash -n` → exit 0.
 - [ ] **Step 2:** Prove the fallback: app stopped, Dell attached, `displayctl disconnect internal`, start the fallback → it restores the built-in display from the ledger, logged. Only then run zero-active steps.
-- [ ] **Step 3:** With the user, run design §8 hardware steps 1–12 in order, with each step's stated preconditions. Before steps 9–11, start `menu-fallback.sh` (step 10: with `--kickstart-after 5`; its timers count from the moment no usable display is active).
+- [ ] **Step 3:** With the user, run design §8 hardware steps 1–12 and 9b in order, with each step's stated preconditions. Before steps 9–11, start `menu-fallback.sh` (step 10: with `--kickstart-after 5`; its timers count from the moment no usable display is active).
 - [ ] **Step 4:** Step 7: `launchctl kill SIGKILL gui/$(id -u)/com.github.duncandoyle.displayctl-menu`; `launchctl print` shows a new PID within 15 s.
-- [ ] **Step 5:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record whether the app (≤ 10 s) or the fallback restored the display.
+- [ ] **Step 5:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record whether the app or the fallback restored the display, against the per-step times in design §8 (9: 10 s after the unplug, 9b: 15 s after dark, 10: 10 s after launch, 11: 10 s after lid open by either route).
 - [ ] **Step 6:** Record each step as observed (date, macOS version) or failed with evidence. An unrun step is not a pass.
 - [ ] **Step 7:** Commit: `docs: Phase 2 hardware results`.

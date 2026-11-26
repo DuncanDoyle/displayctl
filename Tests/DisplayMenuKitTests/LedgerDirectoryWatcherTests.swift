@@ -71,16 +71,25 @@ final class LedgerDirectoryWatcherTests: XCTestCase {
     XCTAssertEqual(changes.values, [true, false])
   }
 
-  func testRestartRecoversAfterTheDirectoryIsDeletedAndRecreated() async throws {
+  /// No explicit restart after the delete: the watcher must create the directory and watch it.
+  func testWatchSurvivesTheDirectoryBeingDeleted() async throws {
     XCTAssertTrue(watcher.restart())
     try FileManager.default.removeItem(at: directory)
-    XCTAssertFalse(watcher.restart())
-
-    try ledger.save([])
-    XCTAssertTrue(watcher.restart())
+    for _ in 0..<500 where !FileManager.default.fileExists(atPath: directory.path) {
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
 
     try await save([entry(builtInID, "Built-in Retina Display")])
     XCTAssertTrue(gate.isRunning)
-    XCTAssertEqual(changes.values, [true])
+    try await save([])
+    XCTAssertFalse(gate.isRunning)
+    XCTAssertEqual(changes.values, [true, false])
+  }
+
+  func testRestartCreatesAMissingDirectory() throws {
+    try FileManager.default.removeItem(at: directory)
+    XCTAssertTrue(watcher.restart())
+    XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
   }
 }

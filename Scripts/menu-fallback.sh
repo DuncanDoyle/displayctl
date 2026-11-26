@@ -74,9 +74,14 @@ run_child() {
   last="unset"
   echo "$(stamp) fallback started (kickstart-after=${KICKSTART_AFTER:-none}, connect-all-after=$CONNECT_ALL_AFTER, deadline=$DEADLINE; times count from when no display is active)"
   # Ready only once displayctl answers, so a broken setup fails before the test starts.
-  if [ "$(active_count)" = "-1" ]; then
+  count="$(active_count)"
+  if [ "$count" = "-1" ]; then
     echo "$(stamp) displayctl list failed; fallback not ready."
     return 1
+  fi
+  if [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
+    dark_at="$(now)"
+    echo "$(stamp) no active display at start: timers start now"
   fi
   : > "$log.ready"
   while :; do
@@ -90,6 +95,19 @@ run_child() {
     if [ -z "$dark_at" ] && [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
       dark_at="$(now)"
       echo "$(stamp) no active display: timers start now"
+    fi
+    # Actions run before the diagnostic list below, which can take up to 10 s.
+    if [ -n "$dark_at" ] && [ "$count" -le 0 ]; then
+      t=$(( $(now) - dark_at ))
+      if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$t" -ge "$KICKSTART_AFTER" ]; then
+        kicked=1
+        echo "$(stamp) dark+${t}s kickstart $LABEL"
+        bounded 10 launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
+      fi
+      if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
+        echo "$(stamp) dark+${t}s still no active display: running connect all"
+        bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
+      fi
     fi
     listing="$(bounded 10 "$DISPLAYCTL" list 2>&1 || true)"
     if [ "$listing" != "$last" ]; then
@@ -119,15 +137,6 @@ run_child() {
     if [ "$count" -gt 0 ]; then
       echo "$(stamp) a display is active again ${t}s after going dark. Done."
       return 0
-    fi
-    if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$t" -ge "$KICKSTART_AFTER" ]; then
-      kicked=1
-      echo "$(stamp) dark+${t}s kickstart $LABEL"
-      bounded 10 launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
-    fi
-    if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
-      echo "$(stamp) dark+${t}s still no active display: running connect all"
-      bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
     fi
     # Sleeps min(1, time left), so the loop does not run past the deadline.
     if [ "$(time_left)" -gt 0 ]; then sleep 1; fi

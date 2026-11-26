@@ -1,7 +1,7 @@
 import Foundation
 
 /// Watches the ledger's directory: the CLI replaces the ledger atomically, so the directory, not
-/// the file, sees each write. A deleted or replaced directory is opened again on its path.
+/// the file, sees each write. A deleted or replaced directory is created again and reopened.
 @MainActor
 public final class LedgerDirectoryWatcher {
   private let directory: URL
@@ -14,10 +14,12 @@ public final class LedgerDirectoryWatcher {
     self.onChange = onChange
   }
 
-  /// Opens the watch again on the current path; false if the directory cannot be opened.
+  /// Creates the directory if missing and opens the watch on it; false if that fails.
   @discardableResult
   public func restart() -> Bool {
     stop()
+    try? FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     let descriptor = open(directory.path, O_EVTONLY)
     guard descriptor >= 0 else { return false }
     let source = DispatchSource.makeFileSystemObjectSource(
@@ -25,7 +27,7 @@ public final class LedgerDirectoryWatcher {
     source.setEventHandler { [weak self, weak source] in
       MainActor.assumeIsolated {
         guard let self, let source else { return }
-        // The descriptor follows the old directory; reopen on the path, or wait for restart().
+        // The descriptor follows the old directory, so watch a new one on the same path.
         if !source.data.isDisjoint(with: [.delete, .rename, .revoke]) { self.restart() }
         self.onChange()
       }
