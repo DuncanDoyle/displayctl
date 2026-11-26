@@ -1,3 +1,11 @@
+Cross-model: YES (author: anthropic/claude-opus-5-5, reviewer: openai/gpt-6.2-sol, command: codex)
+cli: codex · resolved_model: gpt-6.2-sol · status: ok
+Scope: phase 2 (re-review of the phase-review fix round)
+Dimensions: both
+Diff: d601ad1..f42b30c
+Timing: on time
+---
+
 ## Phase 2 fix-round review
 
 **Request changes before closing Phase 2.** At `f42b30c`, I found two P1 bugs and three P2 gaps. Accepted items #1, #3, and #4 are resolved on inspection. Items #2, #5, and #6 remain partly open. The documentation changes for #7 and #8 are incomplete.
@@ -22,3 +30,11 @@
 - **#7 · correctness, owner pending.** Step 9 over **HDMI** and step 12 **logout/login** still need owner runs. The USB-C step 9 pass is recorded. `docs/phases/phase-2/reviews/phase-codex.md:47`, `README.md:234`, `README.md:241`
 
 Read-only review. `git diff --check` passed. The author reported 249 passing tests (201 core, 37 menu kit, 11 CLI), a warning-free release build, clean strict lint and local-path checks, and the expected pre-fix failures for the new tests. I did not rerun those checks.
+## Triage
+| # | Finding | Dimension | Source | Decision | Note |
+|---|---|---|---|---|---|
+| 1 | Undock lost after a lock timeout | architecture | reviewer | accept | Resolved by D-014: the 10 s check finds the dark state without any callback. |
+| 2 | Placeholder ledger entry can reach hardware after its runtime ID changes | correctness | reviewer | accept | Refuse any ledger entry whose UUID belongs to an online placeholder, whatever its ID. |
+| 3 | Extra-episode rule does not bound recovery's own callbacks | architecture | reviewer | accept | Resolved by D-014: follow-up episodes removed; a cooldown bounds retries. |
+| 4 | Fallback deadline still overruns | architecture | reviewer | accept | Each command limited by the remaining budget; the parent waits as long as the readiness probe may take. |
+| 5 | Docs describe different recovery and acceptance rules | correctness | reviewer | accept | Design §6.3 rewritten (D-014); README, plan Task 2, step 9 HDMI flag and the step 11 acceptance wording follow. |

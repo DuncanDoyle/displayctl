@@ -1,3 +1,11 @@
+Cross-model: YES (author: anthropic/claude-opus-5-5, reviewer: openai/gpt-6.2-sol, command: codex)
+cli: codex · resolved_model: gpt-6.2-sol · status: ok
+Scope: design question (event-only vs periodic check)
+Dimensions: both
+Diff: n/a
+Timing: on time
+---
+
 **Recommend A. Keep launch, wake, and display-change events for fast recovery, and add a five-second check while the ledger has a current-boot entry.** The requirement depends on detecting a persistent state: the Mac is awake, a display that `displayctl` disabled can be restored, and the usable active count is zero. A periodic check can detect that state even when the callback stream goes quiet. `docs/phases/phase-2/design.md:115`, `docs/phases/phase-2/design.md:148`
 
 ### Why B cannot guarantee recovery
