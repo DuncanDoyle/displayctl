@@ -231,17 +231,17 @@ After the scripted steps, reconnect the monitor over USB-C, run `list`, then `br
 
 ### Results on macOS 27 — menu bar app (Phase 2)
 
-The steps are in `docs/phases/phase-2/design.md` §8. All were observed on 2026-11-26 on macOS 27.0.1, with the Dell U2720Q over USB-C. Before each step that could leave no display on, a detached fallback outside the app was armed.
+The steps are in `docs/phases/phase-2/design.md` §8. All were observed on 2026-11-26 on macOS 27.0.1, with the Dell U2720Q over USB-C unless a step says HDMI. Before each step that could leave no display on, a detached fallback outside the app was armed.
 
 - [x] 1–5: install, panel, switches, the disabled last-active switch and the brightness slider work.
 - [x] 6: a CLI `disconnect internal` shows up in the open panel. The first run found each CLI change took 10 s; the cause was a main-thread call for display names. Observed again with the fix.
 - [x] 7–8: launchd restarts the app after `kill -9`; after Quit it stays stopped.
 - [x] Placeholder finding: step 9 first failed three times. About 6 s after the unplug, macOS adds a placeholder display, so no moment with zero active displays came (D-012). Its size and mode differ per process, so `displayctl` now detects it by vendor, model and serial only (D-013).
 - [x] Fallback only, app stopped, placeholder as main display: the fallback brought the built-in back 6 s after it went dark.
-- [x] 9: safety net after an unplug, over USB-C (HDMI not yet run). The app brought the built-in back about 2.5 s after the unplug, started by a `reconfiguration` trigger.
+- [x] 9: safety net after an unplug, over USB-C. The app brought the built-in back about 2.5 s after the unplug, started by a `reconfiguration` trigger.
 - [x] 10: startup recovery. `kickstart` ran 5 s after the screen went dark; the app recovered by its `launch` trigger, and the built-in was back 9 s after dark.
 - [x] 11: wake recovery, passed by another route. The app's enable attempts with the lid closed failed, because the panel cannot light with the lid shut, but they left it enabled. macOS lit it when the lid opened, and the wake check found it active.
-- [ ] 9 over HDMI. Not yet run.
+- [x] 9 over HDMI: the app brought the built-in back about 3 s after the screen went dark, started by a `reconfiguration` trigger, on its first attempt; the fallback did nothing. The same session read the Dell over HDMI: `brightness get external` returned 20/100, exit 0.
 - [x] 9b: periodic check alone (D-014), with display, wake and launch triggers off (`DISPLAYCTL_MENU_NO_EVENTS=1`). The log shows an episode started by `tick`; the built-in was back within 1 s of going dark, because a check happened to run right then.
 - [x] 12: after logout and login, the icon appeared without a manual start.
 
