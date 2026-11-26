@@ -92,7 +92,7 @@ Clicking it opens:
 ```
 
 Rows:
-- One row per online display, plus one per ledger entry from the current boot that macOS no longer lists (D-005). Ledger-only rows show as off. Entries from an earlier boot get no row. An orphan left when a display was re-cabled while off (its UUID changes per connection path) cannot be told apart from a real ledger-only display in the same boot, so it shows as an off row; turning it on fails with the controller's error, and `displayctl forget` removes it.
+- One row per online display except the macOS placeholder (D-012), plus one per ledger entry from the current boot that macOS no longer lists (D-005). Ledger-only rows show as off. Entries from an earlier boot get no row. An orphan left when a display was re-cabled while off (its UUID changes per connection path) cannot be told apart from a real ledger-only display in the same boot, so it shows as an off row; turning it on fails with the controller's error, and `displayctl forget` removes it.
 - Switch on = display active. Turning it off calls `disconnect <uuid>`; turning it on calls `connect <uuid>`.
 - The switch of the last active display is disabled, with a short caption ("Only active display"). The controller still enforces the rule; the UI only avoids offering it.
 - While an operation runs, every switch is disabled and the row shows a spinner. Operations run off the main thread, one at a time.
@@ -135,7 +135,7 @@ This keeps the retry budget bounded without missing the next real undock.
 
 Observer registration is part of the safety net. If `CGDisplayRegisterReconfigurationCallback` returns an error, the app logs it and the panel shows "Safety net off: display changes are not being watched." The callback context lives for the whole process; the C callback only hands the event to the main actor and returns.
 
-It never disconnects anything and never acts while a display is active. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged; see §9.
+"Active" here means a usable active display: the macOS placeholder display that appears when no real display is left (vendor `unkn`, model `virt`, 0×0 mm, no display mode) never counts (D-012). The re-arm count uses the same rule. It never disconnects anything and never acts while a usable display is active. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged; see §9.
 
 ### 6.4 Process lifecycle and install
 
