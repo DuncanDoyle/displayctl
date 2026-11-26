@@ -12,7 +12,7 @@ struct LiveServices: Sendable {
 
   init() {
     let executor = BlockingExecutor()
-    let inventory = DisplayInventory()
+    let inventory = DisplayInventory(namesOnMainThread: true)
     // Same ledger and lock as the CLI: the default state directory.
     let controller = ConnectionController(
       snapshot: inventory, hardware: CoreGraphicsDisplayConnectionHardware())

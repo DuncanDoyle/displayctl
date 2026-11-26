@@ -22,10 +22,18 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   private let sampleOnlineIDs: @Sendable () throws -> [UInt32]
   private let sampleActiveIDs: @Sendable () throws -> [UInt32]
   private let retryDelayMicroseconds: useconds_t
+  private var namesOnMainThread = false
 
   public init() {
     self.init(
       candidateDetector: ResolverDDCCandidateDetector(resolver: IORegistryDDCServiceResolver()))
+  }
+
+  /// For an app whose main thread runs AppKit: display names are read there. The CLI must not
+  /// use this: macOS then waits about 10 s for the CLI to handle each display change.
+  public init(namesOnMainThread: Bool) {
+    self.init()
+    self.namesOnMainThread = namesOnMainThread
   }
 
   /// Tests inject the online and active ID samples; they default to Core Graphics.
@@ -63,7 +71,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     guard activeIDSet.isSubset(of: onlineIDs) else {
       throw DisplayControlError.inventoryChanged
     }
-    let localizedNames = Self.localizedNames(for: activeIDSet)
+    let localizedNames = localizedNames(for: activeIDSet)
 
     var metadata: [UInt32: DisplayMetadata] = [:]
     metadata.reserveCapacity(onlineIDs.count)
@@ -235,12 +243,12 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     throw DisplayControlError.inventoryChanged
   }
 
-  /// NSScreen is read on the main thread; a caller on another thread waits for it there.
-  private static func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
-    guard Thread.isMainThread else {
-      return DispatchQueue.main.sync { screenNames(for: activeIDs) }
+  /// With `namesOnMainThread`, a caller on another thread waits for the main thread to read NSScreen.
+  private func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
+    guard !namesOnMainThread || Thread.isMainThread else {
+      return DispatchQueue.main.sync { Self.screenNames(for: activeIDs) }
     }
-    return screenNames(for: activeIDs)
+    return Self.screenNames(for: activeIDs)
   }
 
   private static func screenNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {

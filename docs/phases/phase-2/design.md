@@ -70,7 +70,7 @@ displayctl (CLI)        displayctl-menu (launchd agent)
 Execution boundaries:
 - Blocking controller and inventory calls run on one serial `DispatchQueue` owned by the app, never on the main thread and never on Swift's cooperative pool. Callers `await` them through a continuation. The recovery code depends only on `async` protocols, so the app supplies queue-backed adapters and the CLI keeps its synchronous API.
 - DDC calls stay on the existing `DDCBrightnessController` actor. A write blocks one cooperative thread for at most its bounded retries (a few hundred ms). The slider has at most one write in flight, so at most one thread is ever blocked. Accepted trade-off: it keeps Phase 1's DDC code unchanged.
-- `DisplayInventory` reads display names from `NSScreen`. When called off the main thread it fetches them with `DispatchQueue.main.sync`. The main thread never waits synchronously on the work queue, so this cannot deadlock.
+- `DisplayInventory(namesOnMainThread: true)`, used only by the app, reads display names from `NSScreen` on the main thread with `DispatchQueue.main.sync`. The main thread never waits synchronously on the work queue, so this cannot deadlock. The CLI keeps reading them on its own thread: with the hop, macOS waited about 10 s after each CLI display change for the CLI to handle the change notification (observed 2026-11-26).
 
 ## 6. Components
 
