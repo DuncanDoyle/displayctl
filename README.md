@@ -70,7 +70,7 @@ If it crashes, launchd restarts it. Logs:
 log show --predicate 'subsystem == "displayctl"' --last 1h
 ```
 
-Safety net: when no usable display is active (the macOS placeholder does not count), at launch, after a display change or after wake, the app turns displays that `displayctl` turned off back on, up to 3 attempts. The check and the reconnect happen under the same lock as the CLI. It never turns a display off, and it turns nothing on while any usable display is active. When it finds a usable display active, it also clears saved entries for displays that are already on.
+Safety net: when no usable display is active (the macOS placeholder does not count), at launch, after a display change, after wake, and every 10 s while a display it turned off is in the saved list, the app turns displays that `displayctl` turned off back on, up to 3 attempts. The check and the reconnect happen under the same lock as the CLI. It never turns a display off and never starts while a usable display is active; once it starts at zero it may turn on every display it can, like `connect all`. After 3 failed attempts it waits 60 s (a wake ends the wait). When it finds a usable display active, it also clears saved entries for displays that are already on.
 
 After an undock, macOS may show a placeholder display with no name. `displayctl` ignores it, and `list` notes it on standard error.
 
@@ -238,9 +238,11 @@ The steps are in `docs/phases/phase-2/design.md` §8. All were observed on 2026-
 - [x] 7–8: launchd restarts the app after `kill -9`; after Quit it stays stopped.
 - [x] Placeholder finding: step 9 first failed three times. About 6 s after the unplug, macOS adds a placeholder display, so no moment with zero active displays came (D-012). Its size and mode differ per process, so `displayctl` now detects it by vendor, model and serial only (D-013).
 - [x] Fallback only, app stopped, placeholder as main display: the fallback brought the built-in back 6 s after it went dark.
-- [x] 9: safety net after an unplug. The app brought the built-in back about 2.5 s after the unplug, started by a `reconfiguration` trigger.
+- [x] 9: safety net after an unplug, over USB-C (HDMI not yet run). The app brought the built-in back about 2.5 s after the unplug, started by a `reconfiguration` trigger.
 - [x] 10: startup recovery. `kickstart` ran 5 s after the screen went dark; the app recovered by its `launch` trigger, and the built-in was back 9 s after dark.
 - [x] 11: wake recovery, passed by another route. The app's enable attempts with the lid closed failed, because the panel cannot light with the lid shut, but they left it enabled. macOS lit it when the lid opened, and the wake check found it active.
+- [ ] 9 over HDMI. Not yet run.
+- [ ] 9b: periodic check alone (D-014, events off with `DISPLAYCTL_MENU_NO_EVENTS=1`). Not yet run.
 - [ ] 12: login, the icon appears without a manual start. Not yet run.
 
 ### History: macOS 26.5, 2026-06-30

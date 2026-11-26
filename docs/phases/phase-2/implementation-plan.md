@@ -54,6 +54,8 @@ Throwaway. Answers design §9's open question before the real target exists.
 
 ### Task 2: Safety net in `DisplayControlCore`
 
+> Superseded in part by D-014: the scheduler interface and its tests below describe the first, event-only design. The code now merges events into one settled check, adds a 10 s periodic check while the ledger has a current-boot entry, and a 60 s cooldown; see design §6.3.
+
 **Files:**
 - Modify: `Sources/DisplayControlCore/ConnectionController.swift` (add `recoverIfNoneActive()`; `connectAll()` and it share one private body)
 - Create: `Sources/DisplayControlCore/ZeroActiveRecovery.swift`
