@@ -150,6 +150,52 @@ final class FakeOperations: DisplayOperating {
   }
 }
 
+/// Records reads and writes; a write call can be held at a gate or made to fail, by call index.
+final class FakeBrightness: BrightnessOperating {
+  private struct State {
+    var reads: [UUID] = []
+    var writes: [Int] = []
+    var readResults: [UUID: Result<Int, DisplayControlError>] = [:]
+    var writeGates: [Int: Gate] = [:]
+    var writeErrors: [Int: DisplayControlError] = [:]
+  }
+  private let state = Mutex(State())
+
+  var reads: [UUID] { state.withLock { $0.reads } }
+  var writes: [Int] { state.withLock { $0.writes } }
+
+  func setRead(_ uuid: UUID, _ result: Result<Int, DisplayControlError>) {
+    state.withLock { $0.readResults[uuid] = result }
+  }
+
+  func holdWrite(_ call: Int) -> Gate {
+    let gate = Gate()
+    state.withLock { $0.writeGates[call] = gate }
+    return gate
+  }
+
+  func failWrite(_ call: Int, _ error: DisplayControlError) {
+    state.withLock { $0.writeErrors[call] = error }
+  }
+
+  func percent(for uuid: UUID) async throws -> Int {
+    try state.withLock { state in
+      state.reads.append(uuid)
+      return state.readResults[uuid] ?? .success(40)
+    }.get()
+  }
+
+  func set(_ percent: Int, for uuid: UUID) async throws {
+    let (gate, error) = state.withLock { state in
+      let call = state.writes.count
+      state.writes.append(percent)
+      return (state.writeGates[call], state.writeErrors[call])
+    }
+    await gate?.pass()
+    if let error { throw error }
+  }
+}
+
 struct UnusedBrightness: BrightnessOperating {
   func percent(for uuid: UUID) async throws -> Int { 50 }
   func set(_ percent: Int, for uuid: UUID) async throws {}
