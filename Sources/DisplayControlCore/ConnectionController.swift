@@ -17,6 +17,9 @@ public struct DisplayConnectionOutcome: Sendable {
   }
 }
 
+/// Recovery saw an active display before its first enable; it ends without acting.
+private struct DisplayBecameActive: Error {}
+
 protocol DisplayOperationLocking: Sendable {
   func withLock<T>(_ operation: () throws -> T) throws -> T
 }
@@ -243,22 +246,30 @@ public struct ConnectionController: Sendable {
   /// Attempts every online inactive display and every ledger entry once, in that order. An
   /// unreadable ledger is reported as a last failed outcome; online displays are still attempted.
   public func connectAll() throws -> [DisplayConnectionOutcome] {
-    try operationLock.withLock { try connectAllLocked() }
-  }
-
-  /// Under the operation lock: nil if any display is online and active; otherwise connectAll's
-  /// outcomes.
-  public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]? {
     try operationLock.withLock {
-      guard !(try snapshot.snapshot()).contains(where: { $0.isOnline && $0.isActive }) else {
-        return nil
-      }
-      return try connectAllLocked()
+      try connectAllLocked(from: try snapshot.snapshot(), stopIfActive: false)
     }
   }
 
-  /// The body of `connectAll`; the caller holds the operation lock.
-  private func connectAllLocked() throws -> [DisplayConnectionOutcome] {
+  /// Under the operation lock: nil if any display is online and active; otherwise connectAll's
+  /// outcomes, with candidates from the same snapshot. Stops with nil if a display turns active
+  /// before the first enable succeeds.
+  public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]? {
+    try operationLock.withLock {
+      let displays = try snapshot.snapshot()
+      guard !displays.contains(where: { $0.isOnline && $0.isActive }) else { return nil }
+      do {
+        return try connectAllLocked(from: displays, stopIfActive: true)
+      } catch is DisplayBecameActive {
+        return nil
+      }
+    }
+  }
+
+  /// The body of `connectAll` over `displays`; the caller holds the operation lock.
+  private func connectAllLocked(from displays: [Display], stopIfActive: Bool) throws
+    -> [DisplayConnectionOutcome]
+  {
     var ledgerFailure: DisplayControlError?
     var entries: [DisabledDisplayEntry] = []
     do {
@@ -266,7 +277,8 @@ public struct ConnectionController: Sendable {
     } catch {
       ledgerFailure = error as? DisplayControlError ?? .configurationFailed("\(error)")
     }
-    var candidates = try snapshot.snapshot()
+    var candidates =
+      displays
       .filter { $0.isOnline && !$0.isActive }
       .map { display in (display, entries.first { $0.uuid == display.uuid }) }
     let candidateUUIDs = Set(candidates.map(\.0.uuid))
@@ -274,16 +286,24 @@ public struct ConnectionController: Sendable {
       ($0.placeholder, $0)
     }
 
-    let outcomes = candidates.map { display, entry in
+    var outcomes: [DisplayConnectionOutcome] = []
+    var enabledAny = false
+    for (display, entry) in candidates {
       let result: Result<Display, DisplayControlError>
       do {
-        result = .success(try reconnect(display.uuid, entry: entry, acceptAlreadyActive: true))
+        result = .success(
+          try reconnect(
+            display.uuid, entry: entry, acceptAlreadyActive: true,
+            stopIfActive: stopIfActive && !enabledAny))
+        enabledAny = true
       } catch let error as DisplayControlError {
         result = .failure(error)
+      } catch let error as DisplayBecameActive {
+        throw error
       } catch {
         result = .failure(.configurationFailed(String(describing: error)))
       }
-      return DisplayConnectionOutcome(display: display, result: result)
+      outcomes.append(DisplayConnectionOutcome(display: display, result: result))
     }
     guard let ledgerFailure else { return outcomes }
     return outcomes + [DisplayConnectionOutcome(display: nil, result: .failure(ledgerFailure))]
@@ -312,9 +332,13 @@ public struct ConnectionController: Sendable {
   private func reconnect(
     _ uuid: UUID,
     entry: DisabledDisplayEntry?,
-    acceptAlreadyActive: Bool
+    acceptAlreadyActive: Bool,
+    stopIfActive: Bool = false
   ) throws -> Display {
     let displays = try snapshot.snapshot()
+    if stopIfActive, displays.contains(where: { $0.isOnline && $0.isActive }) {
+      throw DisplayBecameActive()
+    }
     let matches = displays.filter { $0.uuid == uuid }
     guard matches.count <= 1 else {
       throw DisplayControlError.ambiguousSelector(uuid.uuidString)

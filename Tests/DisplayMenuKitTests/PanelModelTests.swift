@@ -126,17 +126,21 @@ final class PanelModelTests: XCTestCase {
   func testNewerRefreshDoesNotDropFailedSwitchError() async {
     let gate = Gate()
     let operations = FakeOperations([builtIn(), dell()])
-    operations.addSwitch(SwitchStep(gate: gate, error: .postconditionFailed("still active")))
     let model = model(operations)
     await model.refresh()
+    operations.addSwitch(SwitchStep(error: .postconditionFailed("still active")))
+    // Holds the switch's follow-up snapshot so a later refresh publishes first.
+    operations.addSnapshot(SnapshotStep(gate: gate, result: .success([builtIn(), dell()])))
 
     let operation = Task { await model.setDisplay(dellID, on: false) }
     await gate.arrived()
+    operations.setCurrent([builtIn(), dell(), display(lgID, "LG UltraFine")])
     await model.refresh()
     XCTAssertEqual(row(model, dellID)?.isBusy, true)
     gate.open()
     await operation.value
 
+    XCTAssertEqual(model.rows.map(\.id), [builtInID, dellID, lgID])
     XCTAssertEqual(row(model, dellID)?.error, "still active")
     XCTAssertEqual(row(model, dellID)?.isBusy, false)
     XCTAssertFalse(model.isBusy)

@@ -28,7 +28,7 @@ public final class PanelModel {
   @ObservationIgnored private var unreadIDs: Set<UUID> = []
   /// Last value seen per display this run, kept after its row leaves.
   @ObservationIgnored private var lastKnown: [UUID: Int] = [:]
-  /// A read result applies only if no newer read or slider value came after it.
+  /// A read result applies only if no newer read or slider value came after it and no write runs.
   @ObservationIgnored private var readTokens: [UUID: Int] = [:]
   @ObservationIgnored private var nextReadToken = 0
 
@@ -154,7 +154,8 @@ public final class PanelModel {
     } catch {
       result = .failure(error)
     }
-    guard readTokens[id] == token else { return }
+    // A write still in flight makes the read stale; the slider keeps the submitted value.
+    guard readTokens[id] == token, coalescers[id]?.isWriting != true else { return }
     switch result {
     case .success(let percent):
       lastKnown[id] = percent

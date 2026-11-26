@@ -29,6 +29,9 @@ import Foundation
     }
   }
 
+  /// True while a write is in flight or a value waits behind it.
+  var isWriting: Bool { task != nil }
+
   public func invalidate() {
     isInvalidated = true
     pending = nil

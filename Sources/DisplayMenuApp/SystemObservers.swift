@@ -29,18 +29,21 @@ final class SystemObservers {
     wakeToken = NSWorkspace.shared.notificationCenter.addObserver(
       forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
     ) { [weak self] _ in
-      MainActor.assumeIsolated { self?.handle(.wake) }
+      let arrival = ContinuousClock.now
+      MainActor.assumeIsolated { self?.handle(.wake, at: arrival) }
     }
 
     let scheduler = scheduler
-    Task { await scheduler.trigger(.launch) }
+    let arrival = ContinuousClock.now
+    Task { await scheduler.trigger(.launch, at: arrival) }
   }
 
-  fileprivate func handle(_ trigger: RecoveryTrigger) {
+  /// `arrival` is stamped when macOS reports the event, so the scheduler can drop it by that time.
+  fileprivate func handle(_ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant) {
     logger.info("trigger \(trigger.rawValue, privacy: .public)")
     let scheduler = scheduler
     let model = model
-    Task { await scheduler.trigger(trigger) }
+    Task { await scheduler.trigger(trigger, at: arrival) }
     Task { await model.refresh() }
   }
 }
@@ -52,5 +55,6 @@ private func displaysReconfigured(
 ) {
   guard !flags.contains(.beginConfigurationFlag), let context else { return }
   let observers = Unmanaged<SystemObservers>.fromOpaque(context).takeUnretainedValue()
-  Task { @MainActor in observers.handle(.reconfiguration) }
+  let arrival = ContinuousClock.now
+  Task { @MainActor in observers.handle(.reconfiguration, at: arrival) }
 }

@@ -162,6 +162,16 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(ledger.entries, [])
   }
 
+  func testRecoverEnablesNothingWhenADisplayTurnsActiveAfterTheCheck() throws {
+    let external = fixture(2, active: false, kind: .external)
+    let store = FakeDisplayStore([fixture(1, active: false), external])
+    // The Dell becomes active right after the locked zero-active check.
+    store.displaysAtSnapshot[2] = [fixture(1, active: false), replacing(external, active: true)]
+
+    XCTAssertNil(try makeController(store).recoverIfNoneActive())
+    XCTAssertEqual(store.requests, [])
+  }
+
   func testRecoverAfterCLIConnectWinsLockEnablesNothing() throws {
     let store = FakeDisplayStore([fixture(1, active: false), fixture(2, active: false)])
     let lock = PreemptedOperationLock()

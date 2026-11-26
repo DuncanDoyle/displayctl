@@ -121,8 +121,8 @@ public struct ZeroActiveRecovery: Sendable {
   }
 }
 
-/// Debounces triggers (settle), runs one episode at a time, drops triggers during an episode.
-/// After .failed only .wake, or a .reconfiguration with activeCount() > 0, re-arms it.
+/// Debounces triggers (settle), runs one episode at a time, drops triggers that arrived during one.
+/// After .failed only .wake, or a .reconfiguration seeing activeCount() > 0, re-arms it.
 public actor RecoveryScheduler {
   private let recovery: ZeroActiveRecovery
   private let activeCount: @Sendable () async -> Int
@@ -135,6 +135,9 @@ public actor RecoveryScheduler {
   private var wakeInWindow = false
   private var running = false
   private var disarmed = false
+  /// A .reconfiguration that arrived while disarmed saw an active display.
+  private var activeSeenWhileDisarmed = false
+  private var lastEpisodeEnd: ContinuousClock.Instant?
   private var tasks: [Int: Task<Void, Never>] = [:]
 
   public init(
@@ -151,8 +154,16 @@ public actor RecoveryScheduler {
     self.onOutcome = onOutcome
   }
 
-  public func trigger(_ trigger: RecoveryTrigger) {
-    guard !running else { return }
+  /// `arrival` is when macOS reported the event; one from before the last episode ended is dropped.
+  public func trigger(
+    _ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant = .now
+  ) async {
+    guard !arrivedDuringEpisode(arrival) else { return }
+    if disarmed, trigger == .reconfiguration, await activeCount() > 0 {
+      activeSeenWhileDisarmed = true
+    }
+    // An episode may have run while the count was taken.
+    guard !arrivedDuringEpisode(arrival) else { return }
     generation += 1
     latestTrigger = trigger
     wakeInWindow = wakeInWindow || trigger == .wake
@@ -173,22 +184,34 @@ public actor RecoveryScheduler {
     }
   }
 
+  /// True when no settle window or episode is pending. For tests.
+  var isIdle: Bool { tasks.isEmpty }
+
   private func settled(_ id: Int) async {
     // A later trigger restarted the settle window.
     guard id == generation, !running else { return }
     let trigger = wakeInWindow ? RecoveryTrigger.wake : latestTrigger
     wakeInWindow = false
     if disarmed && trigger != .wake {
-      // An active display re-arms the safety net; there is nothing to recover now.
-      if await activeCount() > 0 { disarmed = false }
-      return
+      // A display seen active in this window re-arms the net; recover only if none is active now.
+      let sawActive = activeSeenWhileDisarmed
+      activeSeenWhileDisarmed = false
+      let activeNow = await activeCount() > 0
+      if sawActive || activeNow { disarmed = false }
+      guard sawActive, !activeNow, id == generation, !running else { return }
     }
     disarmed = false
+    activeSeenWhileDisarmed = false
     running = true
     let outcome = await recovery.run(trigger: trigger)
     running = false
+    lastEpisodeEnd = .now
     if case .failed = outcome { disarmed = true }
     onOutcome(outcome)
+  }
+
+  private func arrivedDuringEpisode(_ arrival: ContinuousClock.Instant) -> Bool {
+    running || lastEpisodeEnd.map { arrival < $0 } ?? false
   }
 
   private func removeTask(_ id: Int) {

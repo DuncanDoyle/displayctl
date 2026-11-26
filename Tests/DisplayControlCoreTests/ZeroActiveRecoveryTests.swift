@@ -191,7 +191,8 @@ final class RecoverySchedulerTests: XCTestCase {
 
     XCTAssertEqual(harness.connector.calls, 3)
     XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3)])
-    XCTAssertEqual(harness.activeCount.calls, 1)
+    // Once when the trigger arrives, once when its window settles.
+    XCTAssertEqual(harness.activeCount.calls, 2)
   }
 
   func testFailedEpisodeRearmsOnWake() async {
@@ -216,6 +217,41 @@ final class RecoverySchedulerTests: XCTestCase {
     await harness.fire(.reconfiguration)
     XCTAssertEqual(harness.connector.calls, 6)
     XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+  }
+
+  func testDisplayActiveInsideOneSettleWindowRearmsAfterFailure() async {
+    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
+    await harness.fire(.launch)
+
+    // The Dell is plugged in, then unplugged again before the window ends.
+    harness.activeCount.value = 1
+    await harness.scheduler.trigger(.reconfiguration)
+    harness.activeCount.value = 0
+    await harness.scheduler.trigger(.reconfiguration)
+    await harness.settleAndDrain(sleeps: 2)
+
+    XCTAssertEqual(harness.connector.calls, 6)
+    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+  }
+
+  func testReconfigurationStampedDuringEpisodeIsDroppedWhenDeliveredLate() async throws {
+    let stamp = Mutex<ContinuousClock.Instant?>(nil)
+    let connector = FakeConnector([.failure(.inventoryChanged)]) { _ in
+      stamp.withLock { $0 = $0 ?? .now }
+    }
+    let harness = SchedulerHarness(connector: connector)
+    await harness.fire(.launch)
+    XCTAssertEqual(harness.outcomes.values, [.inconclusive])
+
+    // macOS reported it during the episode; it reaches the scheduler only now.
+    let arrival = try XCTUnwrap(stamp.withLock { $0 })
+    await harness.scheduler.trigger(.reconfiguration, at: arrival)
+    let idle = await harness.scheduler.isIdle
+    if !idle { await harness.settleAndDrain(sleeps: 1) }
+
+    XCTAssertTrue(idle)
+    XCTAssertEqual(connector.calls, 5)
+    XCTAssertEqual(harness.outcomes.values, [.inconclusive])
   }
 
   func testInconclusiveDoesNotDisarm() async {
