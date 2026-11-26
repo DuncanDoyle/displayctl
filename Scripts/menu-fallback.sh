@@ -58,10 +58,11 @@ run_child() {
   while :; do
     elapsed=$(( $(now) - start ))
     count="$(active_count)"
-    if [ "$count" != "$last" ]; then
+    listing="$("$DISPLAYCTL" list 2>&1 || true)"
+    if [ "$listing" != "$last" ]; then
       echo "$(stamp) t=${elapsed}s active displays: $count"
-      "$DISPLAYCTL" list 2>&1 | sed "s/^/$(stamp)   /" || true
-      last="$count"
+      printf "%s\n" "$listing" | sed "s/^/$(stamp)   /"
+      last="$listing"
     fi
     if [ "$EVEN_IF_ACTIVE" -eq 1 ]; then
       if [ "$elapsed" -ge "$CONNECT_ALL_AFTER" ]; then

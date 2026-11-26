@@ -431,6 +431,13 @@ final class DisplayInventoryTests: XCTestCase {
     XCTAssertFalse(try XCTUnwrap(ddc.first { $0.runtimeID == 1 }).isPlaceholder)
   }
 
+  // The placeholder may report a mode object of 0×0 pixels instead of no mode at all.
+  func testOnlyAModeWithAPixelSizeCountsAsCurrentMode() {
+    XCTAssertFalse(DisplayInventory.hasUsableMode(pixelWidth: nil, pixelHeight: nil))
+    XCTAssertFalse(DisplayInventory.hasUsableMode(pixelWidth: 0, pixelHeight: 0))
+    XCTAssertTrue(DisplayInventory.hasUsableMode(pixelWidth: 1920, pixelHeight: 1080))
+  }
+
   func testPlaceholderSkipsDDCLookup() throws {
     let detector = CountingDDCCandidateDetector()
     let placeholder = Display(

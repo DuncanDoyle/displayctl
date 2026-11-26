@@ -113,7 +113,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   }
 
   /// The macOS placeholder signature seen on macOS 27.0.1 (D-012): vendor 'unkn', model 'virt',
-  /// 0×0 mm and no current mode. A heuristic: all four must hold.
+  /// 0×0 mm and no current mode with a pixel size. A heuristic: all four must hold.
   static func isPlaceholder(
     vendorNumber: UInt32, modelNumber: UInt32, sizeMillimeters: CGSize, hasCurrentMode: Bool
   ) -> Bool {
@@ -132,7 +132,14 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     return isPlaceholder(
       vendorNumber: placeholderVendor, modelNumber: placeholderModel,
       sizeMillimeters: CGDisplayScreenSize(displayID),
-      hasCurrentMode: CGDisplayCopyDisplayMode(displayID) != nil)
+      hasCurrentMode: hasUsableMode(
+        pixelWidth: CGDisplayCopyDisplayMode(displayID)?.pixelWidth,
+        pixelHeight: CGDisplayCopyDisplayMode(displayID)?.pixelHeight))
+  }
+
+  /// A mode counts only with a pixel size; the placeholder may report a 0×0 mode instead of none.
+  static func hasUsableMode(pixelWidth: Int?, pixelHeight: Int?) -> Bool {
+    (pixelWidth ?? 0) > 0 && (pixelHeight ?? 0) > 0
   }
 
   /// Active displays minus placeholders; cheap enough for the safety net's re-arm check.
