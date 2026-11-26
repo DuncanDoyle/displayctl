@@ -108,7 +108,7 @@ Rows:
 - Shown under each active external display whose DDC capability is not `unsupported`.
 - The app reads the current value (`DDCBrightnessController.get`) when the panel opens and whenever a row gains a slider while the panel is open (display turned on, monitor plugged in). Until a read succeeds the label shows "—" and the slider sits at the last value this app run saw, or the middle. Showing the slider never writes. A reply with maximum 0 counts as a failed read.
 - While dragging, at most one DDC write is in flight. When it finishes, the app sends the newest value if it changed. The value where the owner let go is always written last. Slider values reach the coalescer in the order they were produced: the coalescer lives on the main actor and is called synchronously from the slider.
-- Each write looks up the display by UUID in a fresh snapshot just before sending, and is dropped if that UUID is no longer online and active. When a display leaves or turns off, its pending value is discarded and late results for it are ignored. A queued value therefore never reaches a different monitor that reused the runtime ID.
+- Each write looks up the display by UUID in a fresh snapshot just before sending, and is dropped if that UUID is no longer online and active. When a display leaves or turns off, its pending value is discarded and late results for it are ignored. A queued value therefore never reaches a different monitor that reused the runtime ID. The guarantee covers queued values, not a write already handed to the DDC actor: a runtime ID reused while that write waits for or runs on the actor can reach the replacement monitor. Accepted on the same grounds as the owner-confirmed Phase 1 case (reviews/design2-codex.md #5): it needs an unplug and a different monitor in that window, and the result is only a brightness change (reviews/code-codex.md #5, owner confirmation pending).
 - Write failures show one line under the slider; the next drag tries again.
 - Range 0–100 %, step 1.
 
@@ -176,7 +176,7 @@ Each step starts with both displays on and the app running unless it says otherw
 7. `kill -9` the app: launchd restarts it and the icon returns.
 8. Quit: the app stays stopped until `kickstart` or the next login.
 9. Safety net, panel closed: built-in off from the panel, close the panel, unplug the Dell. The built-in display comes back without input; the log shows a `reconfiguration` trigger. Over HDMI; USB-C if available.
-10. Startup recovery: Quit the app; turn the built-in off with the CLI; unplug the Dell. Once the screen is dark, start the fallback with a `launchctl kickstart` 5 s after it starts. The built-in display comes back; the log shows a `launch` trigger and no earlier `reconfiguration` episode.
+10. Startup recovery: Quit the app; turn the built-in off with the CLI. Start the fallback with `--kickstart-after 20`, then unplug the Dell within 10 s. Zero active is established before the kickstart starts the app. The built-in display comes back; the log shows a `launch` trigger and no earlier `reconfiguration` episode.
 11. Wake recovery: built-in off, Dell attached; close the lid; unplug the Dell (the Mac sleeps); wait 10 s; open the lid. The built-in display comes back within 10 s of opening; the log shows which trigger started the episode, and the step passes only if it is `wake` or a `reconfiguration` stamped after the wake.
 12. Login: log out and in; the icon appears without manual start.
 

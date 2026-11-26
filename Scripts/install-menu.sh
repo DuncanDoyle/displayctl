@@ -14,17 +14,14 @@ echo "Building release binaries..."
 swift build -c release --package-path "$REPO_ROOT"
 BUILD_DIR="$(swift build -c release --package-path "$REPO_ROOT" --show-bin-path)"
 
-# Install the CLI too, so both run the same build and share one ledger format.
-mkdir -p "$BIN_DIR"
-cp "$BUILD_DIR/displayctl-menu" "$BIN_DIR/displayctl-menu"
-cp "$BUILD_DIR/displayctl" "$BIN_DIR/displayctl"
-echo "Installed $BIN_DIR/displayctl-menu"
-echo "Installed $BIN_DIR/displayctl (same build as the menu bar app)"
-
-# Render the plist; '|' as delimiter since the path contains '/'.
-mkdir -p "$AGENTS_DIR"
-sed "s|__BINARY__|$BIN_DIR/displayctl-menu|" "$SCRIPT_DIR/$LABEL.plist" > "$PLIST"
-plutil -lint "$PLIST"
+# Stage everything next to its destination first, so a failure leaves the old install intact.
+mkdir -p "$BIN_DIR" "$AGENTS_DIR"
+cp "$BUILD_DIR/displayctl-menu" "$BIN_DIR/.displayctl-menu.new"
+cp "$BUILD_DIR/displayctl" "$BIN_DIR/.displayctl.new"
+cp "$SCRIPT_DIR/$LABEL.plist" "$PLIST.new"
+# plutil writes the path as a plist string, so no characters in it need escaping.
+plutil -replace ProgramArguments.0 -string "$BIN_DIR/displayctl-menu" "$PLIST.new"
+plutil -lint "$PLIST.new"
 
 # Stop an old instance; a missing one is fine.
 if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
@@ -35,6 +32,14 @@ if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
     sleep 1
   done
 fi
+
+# Replace the installed files only now; mv within one directory is atomic.
+mv -f "$BIN_DIR/.displayctl-menu.new" "$BIN_DIR/displayctl-menu"
+mv -f "$BIN_DIR/.displayctl.new" "$BIN_DIR/displayctl"
+mv -f "$PLIST.new" "$PLIST"
+echo "Installed $BIN_DIR/displayctl-menu"
+echo "Installed $BIN_DIR/displayctl (same build as the menu bar app)"
+
 launchctl bootstrap "$DOMAIN" "$PLIST"
 
 echo "Loaded $LABEL:"
