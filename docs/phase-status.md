@@ -19,7 +19,7 @@ Status: implementing on branch duncandoyle/menuBar (executing-plans, Claude impl
 - [x] Q7 Task 5 displayctl-menu app — 41ea4db (built, not yet run; first run with the owner). 217 tests pass. The CLI also takes the main-thread hop for `NSScreen` names (works: `list` checked). Each reconfiguration callback refreshes once (not coalesced).
 - [x] Q8 Task 6 install, uninstall, README — 7ecb2c5 (scripts not yet run; install with the owner)
 - [x] Q9a Code review fixes (reviews/code-codex.md) — c130faf; 221 tests pass
-- [ ] Q9 Task 7 hardware validation ← CURRENT — fallback proven (detached `connect all` restored the built-in from the ledger); install OK; steps 1–5 passed; step 6 found the CLI taking 10 s per change (main-thread name hop, fixed)
+- [ ] Q9 Task 7 hardware validation ← CURRENT — fallback proven (detached `connect all` restored the built-in from the ledger); install OK; steps 1–5 passed; step 6 found the CLI taking 10 s per change (main-thread name hop, fixed); steps 7–8 passed; step 9 found the macOS placeholder display (D-012, D-013); fallback-only proof with the placeholder as main passed 2026-11-26 11:24 (built-in back 6 s after dark)
 - [ ] Q10 Codex phase review; must check the P2 fixes from reviews/design2-codex.md that were not re-reviewed
 
 ### Exit gates
