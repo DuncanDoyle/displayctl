@@ -203,8 +203,9 @@ public struct ConnectionController: Sendable {
   private func connect(_ kind: DisplayKind, selector: String, in displays: [Display]) throws
     -> Display
   {
-    let online = displays.filter { $0.kind == kind }
-    let onlineUUIDs = Set(online.map(\.uuid))
+    // The placeholder is no candidate, but its UUID still counts as online for the ledger.
+    let onlineUUIDs = Set(displays.filter { $0.kind == kind }.map(\.uuid))
+    let online = displays.filter { $0.kind == kind && !$0.isPlaceholder }
     let inactive = online.filter { !$0.isActive }
     let entries: [DisabledDisplayEntry]
     do {

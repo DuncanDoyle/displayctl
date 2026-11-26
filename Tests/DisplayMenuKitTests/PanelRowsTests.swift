@@ -68,6 +68,16 @@ final class PanelRowsTests: XCTestCase {
     XCTAssertEqual(make([placeholder]), [])
   }
 
+  func testLedgerEntryWithTheOnlinePlaceholderUUIDHasNoRow() {
+    let placeholder = Display(
+      uuid: lgID, runtimeID: 12, name: "External Display", kind: .external, isOnline: true,
+      isActive: true, isMain: true, ddcCapability: .unknown, isPlaceholder: true)
+
+    let rows = make([builtIn(), placeholder], ledger: [entry(lgID, "LG UltraFine")])
+
+    XCTAssertEqual(rows.map(\.id), [builtInID])
+  }
+
   func testAllSwitchesDisabledWhileBusy() {
     let rows = make(
       [builtIn(), dell()], ledger: [entry(lgID, "LG UltraFine")], busy: dellID,

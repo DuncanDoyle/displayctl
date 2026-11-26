@@ -211,7 +211,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isOnline: display.isOnline,
         isActive: display.isActive,
         isMain: display.isMain,
-        ddcCapability: detector.capability(for: display),
+        // The placeholder has no DDC bus, so skip the registry lookup.
+        ddcCapability: display.isPlaceholder ? .unsupported : detector.capability(for: display),
         isPlaceholder: display.isPlaceholder
       )
     }

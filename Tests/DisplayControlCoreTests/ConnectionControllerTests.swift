@@ -237,6 +237,67 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
   }
 
+  func testDisconnectExternalWithOnlyThePlaceholderActiveFindsNoExternal() {
+    let store = FakeDisplayStore([fixture(1, active: false), placeholder(12)])
+
+    XCTAssertThrowsError(try makeController(store).disconnect("external")) {
+      XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("external"))
+    }
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testDisconnectExternalResolvesTheRealExternalBesideThePlaceholder() throws {
+    let builtIn = fixture(1, active: true)
+    let external = fixture(2, active: true, kind: .external)
+    let store = FakeDisplayStore([builtIn, external, placeholder(12)])
+    store.reactions = [.init(id: 2, enabled: false): [builtIn, placeholder(12)]]
+
+    let display = try makeController(store).disconnect("external")
+
+    XCTAssertEqual(display.uuid, external.uuid)
+    XCTAssertEqual(store.requests, [.init(id: 2, enabled: false)])
+  }
+
+  func testConnectExternalNeverReportsThePlaceholderAsAlreadyActive() {
+    let store = FakeDisplayStore([fixture(1, active: true), placeholder(12)])
+
+    XCTAssertThrowsError(try makeController(store).connect("external")) {
+      XCTAssertEqual($0 as? DisplayControlError, .displayNotFound("external"))
+    }
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testPlaceholderUUIDSelectorIsNotFound() {
+    let store = FakeDisplayStore([fixture(1, active: true), placeholder(12)])
+    let selector = placeholder(12).uuid.uuidString
+
+    XCTAssertThrowsError(try makeController(store).connect(selector)) {
+      XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(selector))
+    }
+    XCTAssertThrowsError(try makeController(store).disconnect(selector)) {
+      XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(selector))
+    }
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testRollbackSkipsWhenThePlaceholderHoldsTheSavedID() {
+    let external = fixture(1, active: true, kind: .external)
+    let other = fixture(2, active: true)
+    let store = FakeDisplayStore([external, other])
+    let ledger = FakeLedger()
+    store.reactions = [.init(id: 1, enabled: false): [other]]
+    store.snapshotFailureCall = 2
+    store.displaysAtSnapshot = [3: [other, placeholder(1)]]
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).disconnect("1")) {
+      assertPostcondition(
+        $0,
+        contains: ["rollback skipped", "runtime ID 1", placeholder(1).uuid.uuidString])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false)])
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+  }
+
   func testDisplayConnectionOutcomePublicInitializerPreservesTypedFailure() {
     let display = fixture(1, active: false)
     let outcome = DisplayConnectionOutcome(

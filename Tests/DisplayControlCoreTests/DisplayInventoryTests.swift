@@ -431,6 +431,19 @@ final class DisplayInventoryTests: XCTestCase {
     XCTAssertFalse(try XCTUnwrap(ddc.first { $0.runtimeID == 1 }).isPlaceholder)
   }
 
+  func testPlaceholderSkipsDDCLookup() throws {
+    let detector = CountingDDCCandidateDetector()
+    let placeholder = Display(
+      uuid: externalUUID, runtimeID: 12, name: "External Display", kind: .external,
+      isOnline: true, isActive: true, isMain: true, ddcCapability: .unknown, isPlaceholder: true)
+
+    let result = DisplayInventory.applyingDDCCapabilities(to: [placeholder], detector: detector)
+
+    XCTAssertEqual(result.first?.ddcCapability, .unsupported)
+    XCTAssertTrue(try XCTUnwrap(result.first).isPlaceholder)
+    XCTAssertEqual(detector.calls, 0)
+  }
+
   func testUsableActiveCountSkipsPlaceholders() {
     XCTAssertEqual(
       DisplayInventory.usableActiveCount(activeIDs: [], isPlaceholder: { _ in false }), 0)
@@ -471,6 +484,18 @@ final class DisplayInventoryTests: XCTestCase {
 
 struct UnknownDDCCandidateDetector: DDCCandidateDetecting {
   func capability(for display: Display) -> DDCCapability { .unknown }
+}
+
+private final class CountingDDCCandidateDetector: DDCCandidateDetecting, @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+
+  var calls: Int { lock.withLock { count } }
+
+  func capability(for display: Display) -> DDCCapability {
+    lock.withLock { count += 1 }
+    return .candidate
+  }
 }
 
 /// Counts sampler calls; `next()` returns the 1-based call number.

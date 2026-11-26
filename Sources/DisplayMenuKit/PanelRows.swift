@@ -22,8 +22,9 @@ public enum PanelRows {
     displays: [Display], ledger: [DisabledDisplayEntry], currentBoot: String,
     busy: UUID?, errors: [UUID: String]
   ) -> [DisplayRow] {
+    // The ledger check uses every online UUID, the placeholder's included.
+    let onlineIDs = Set(displays.filter(\.isOnline).map(\.uuid))
     let online = displays.filter { $0.isOnline && !$0.isPlaceholder }
-    let onlineIDs = Set(online.map(\.uuid))
     let activeCount = online.filter(\.isActive).count
 
     func row(_ id: UUID, _ name: String, _ kind: DisplayKind, isOn: Bool, brightness: Bool)
