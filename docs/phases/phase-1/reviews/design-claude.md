@@ -92,7 +92,7 @@ My recommendation: fix findings 1, 2 and 5 before closing Phase 1. Decide findin
 | 5 | HDMI brightness not rechecked with doubled sends | correctness | reviewer | accept | Owner hardware check (same as phase-codex #3). |
 | 6 | Inconsistent inventory read throws instead of retrying | architecture | reviewer | accept | Bounded retry inside `snapshot()` in sub-phase 1.2; Phase 2 drops its string match. |
 | 7 | Last-active invariant checked only before the change | correctness | reviewer | accept | Same as phase-codex #1 (P1). |
-| 8a | Tests assert `.forSession` | correctness | reviewer | reject: the scope still matters. D-010's reboot recovery likely depends on the session scope; a permanent scope could survive reboot. The tests protect that. | |
+| 8a | Tests assert `.forSession` | correctness | reviewer | reject: the tests pin the configuration that was observed to survive logout and be undone by a reboot (D-008, D-010). Whether `.forSession` causes the reboot reset is not proven; a different option would need its own reboot check, and the failing test forces that. | Owner agreed (2026-11-26). Reboot check added to the per-macOS-release hardware matrix. |
 | 8b | `DDCCapability.confirmed` never produced | correctness | reviewer | defer: Phase 2 | Phase 2 may set it after a successful read; otherwise remove. |
 | 9 | Lock timeout recognisable only by message | architecture | reviewer | accept | New error case in sub-phase 1.2, temporary failure (exit 75). |
 | 10 | Snapshot walks the I/O Registry; brightness writes are costly | architecture | reviewer | defer: Phase 2 | Measure snapshot and `set` cost early in Phase 2 before the slider relies on them. |

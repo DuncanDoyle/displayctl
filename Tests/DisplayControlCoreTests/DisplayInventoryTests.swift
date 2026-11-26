@@ -268,10 +268,7 @@ final class DisplayInventoryTests: XCTestCase {
         return .success
       }
     ) {
-      XCTAssertEqual(
-        $0 as? DisplayControlError,
-        .configurationFailed("TestDisplayList display list was unstable after 2 attempts")
-      )
+      XCTAssertEqual($0 as? DisplayControlError, .inventoryChanged)
     }
     XCTAssertEqual(callCount, 6)
   }
@@ -360,14 +357,18 @@ final class DisplayInventoryTests: XCTestCase {
   }
 
   func testSnapshotRetriesInconsistentSample() throws {
-    let samples = SampleCounter()
-    // First sample: active ID 1 missing from the online list; second sample: consistent and empty.
+    let online = SampleCounter()
+    let active = SampleCounter()
+    // First sample: online [7] but active [1]; second sample: both empty. A retry that kept the
+    // first online list would see [7] online with no metadata and fail.
     let inventory = DisplayInventory(
-      candidateDetector: UnknownDDCCandidateDetector(), onlineIDs: { [] },
-      activeIDs: { samples.next() == 1 ? [1] : [] }, retryDelayMicroseconds: 0)
+      candidateDetector: UnknownDDCCandidateDetector(),
+      onlineIDs: { online.next() == 1 ? [7] : [] },
+      activeIDs: { active.next() == 1 ? [1] : [] }, retryDelayMicroseconds: 0)
 
     XCTAssertEqual(try inventory.snapshot(), [])
-    XCTAssertEqual(samples.count, 2)
+    XCTAssertEqual(online.count, 2)
+    XCTAssertEqual(active.count, 2)
   }
 
   func testSnapshotThrowsInventoryChangedAfterRetries() {

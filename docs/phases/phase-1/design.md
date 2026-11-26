@@ -111,7 +111,7 @@ The UUID is the canonical identifier. Runtime display IDs can change and are onl
 
 The UUID is stable only while the display uses the same cable and port. The Dell U2720Q got a different UUID over HDMI than over USB-C. If a display is disabled and then re-cabled, its ledger entry (§6.3.1) no longer matches any display. That orphan entry stays until `displayctl forget` removes it. This is a known limitation.
 
-If the display list changes while it is read, `snapshot()` retries the sample up to 3 times, 20 ms apart. After that it throws `inventoryChanged`.
+If the display list changes while it is read, `snapshot()` samples up to 3 times in total, 20 ms apart. This also covers a single display list that keeps changing between its count and values reads. After that it throws `inventoryChanged`.
 
 Soft-disconnected displays leave the online display inventory on macOS 26.5 and 27 (D-005). The ledger (§6.3.1) is the persistent identity record that makes them reachable again.
 
@@ -137,7 +137,7 @@ Connection changes use this sequence:
 6. Begin a Core Graphics display configuration transaction.
 7. Invoke `CGSConfigureDisplayEnabled` through the private bridge.
 8. Complete the transaction with the session configuration option (`.forSession`). Despite its name, the change survives logout (D-008). A reboot undoes it (D-010).
-9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005). After a disable, at least one display must still be active; if none is, the disconnect fails and is rolled back.
+9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005). After a disable, at least one display must still be active; if none is, the disconnect fails and a rollback is attempted under the same identity rules as `connect`. The rollback can be skipped (runtime ID now held elsewhere) or fail; then the ledger entry stays, and `connect all` remains the recovery.
 10. Release the display-operation lock.
 
 If configuration fails before completion, the transaction is cancelled. On macOS 27 a disable survives logout/login, so logout is not a recovery boundary (D-008). Recovery is `displayctl connect all` from the ledger, then a reboot, which restores the display (D-010).
@@ -149,10 +149,10 @@ The operation lock uses Darwin `flock` on a lock file in `~/Library/Application 
 macOS can drop a soft-disabled display from the online display list, so the inventory alone cannot always find it again. The controller therefore keeps a per-user ledger file of displays that `displayctl` disabled:
 
 - The ledger and the operation lock live in `~/Library/Application Support/displayctl/`, independent of the working directory and `$TMPDIR`, so the CLI, the hardware-test watchdog and the Phase 2 agent share them.
-- A disconnect records the display's UUID, runtime ID, name and the current boot time in the ledger, atomically and under the operation lock, before invoking `CGSConfigureDisplayEnabled`. If recording fails, the disconnect does not happen.
+- A disconnect records the display's UUID, runtime ID, name, kind and the current boot session (`kern.bootsessionuuid`) in the ledger, atomically and under the operation lock, before invoking `CGSConfigureDisplayEnabled`. If recording fails, the disconnect does not happen.
 - A connect resolves its selector against the inventory and the ledger, by UUID first (D-004). If the UUID is online, its current runtime ID is used. An offline entry is enabled by its recorded runtime ID only when the entry is from the current boot (`kern.bootsessionuuid`), no online display of another UUID holds that ID, and Core Graphics does not map that ID to another UUID right before the enable. Otherwise the entry is reported and skipped. The disconnect rollback follows the same rule.
 - An entry is removed only once its UUID is verified active again, or when the user runs `displayctl forget`. Entries whose state is uncertain are kept.
-- Entries from an earlier boot are kept for reporting but never trigger a mutation.
+- An entry from an earlier boot is never enabled by its recorded runtime ID. If its UUID is online, `connect` and `connect all` use the current runtime ID as for any online display.
 - An entry whose display was re-cabled while disabled gets a new UUID (§6.1), so the entry is orphaned. `connect all` reports it as a failure until `displayctl forget <uuid|all>` removes it.
 - Identity checks and per-display outcomes stay in `DisplayControlCore`; the CLI only maps them to exit codes, so Phase 2 can reuse them under the lock.
 

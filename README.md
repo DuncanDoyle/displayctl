@@ -165,13 +165,13 @@ USB-C recabling and logout/login stay manual.
 
 ### Results on macOS 27
 
-Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass.
+Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun check is not a pass. After a macOS update, run the matrix again, including the logout and reboot checks: they show what undoes a disconnect, and the code relies on that.
 
 - [x] Build completes on the target — observed 2026-11-23 (macOS 27.0.1).
 - [x] Automated tests pass on the target (final count in docs/phase-status.md) — observed 2026-11-23 (macOS 27.0.1).
 - [x] Interactive `list` shows internal and HDMI displays with stable UUIDs — observed 2026-11-23 (macOS 27.0.1).
 - [x] HDMI brightness get succeeds (read 10 and 30) — observed 2026-11-23 (macOS 27.0.1).
-- [x] HDMI brightness set is visually confirmed on the physical monitor — observed 2026-11-23 (macOS 27.0.1), before DDC requests were sent twice; HDMI is not yet rechecked with the doubled sends.
+- [x] HDMI brightness set is visually confirmed on the physical monitor — observed 2026-11-23 (macOS 27.0.1) with single sends, and again on 2026-11-25 with the doubled sends (owner, installed binary built after the change).
 - [x] Watchdog restored the internal display from the ledger after it left the online list — observed 2026-11-23 (macOS 27.0.1).
 - [x] Internal session disconnect and reconnect, with the watchdog armed — observed 2026-11-23 (macOS 27.0.1).
 - [x] A watchdog timeout restored a usable screen: in run 4 (USB-C) the final YES was withheld, and the watchdog restored the Dell from the ledger 20 s later — observed 2026-11-23 (macOS 27.0.1). It ran at the end of the external steps, not as a separate run before them.

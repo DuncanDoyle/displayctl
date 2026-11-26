@@ -261,6 +261,23 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(hardware.requests, [.init(id: 1, enabled: false)])
   }
 
+  func testDisconnectFailsWhenTargetLeavesListAndNothingIsActive() {
+    let target = fixture(1, active: true)
+    let other = fixture(2, active: true, kind: .external)
+    let store = FakeDisplayStore([target, other])
+    // Other display unplugged and the disabled target dropped from the list (D-005): nothing left.
+    store.reactions = [
+      .init(id: 1, enabled: false): [],
+      .init(id: 1, enabled: true): [target],
+    ]
+
+    XCTAssertThrowsError(try makeController(store).disconnect("1")) {
+      assertPostcondition($0, contains: ["no active display", "rollback enabled true completed"])
+    }
+    // Rollback found the target absent and enabled it by its recorded runtime ID.
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
+  }
+
   func testDisconnectFailsAndRollsBackWhenNoDisplayRemainsActive() {
     let target = fixture(1, active: true)
     let other = fixture(2, active: true, kind: .external)

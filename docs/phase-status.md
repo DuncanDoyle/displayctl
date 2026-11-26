@@ -49,6 +49,7 @@ New features, architecture changes, new dependencies; Phase 2 code.
 none
 
 ## Carry-over (deferred to later phases)
+- (P4 correctness) HDMI `brightness get external` with the current binary, next time the Dell is on HDMI — src: phases/phase-1/reviews/1.2-codex.md#4
 - (P3 correctness) Phase 2: set `DDCCapability.confirmed` after a successful read, or remove it — src: phases/phase-1/reviews/design-claude.md#8
 - (P4 architecture) Phase 2: measure snapshot and brightness-set cost (I/O Registry walks) before the slider relies on them — src: phases/phase-1/reviews/design-claude.md#10, phase-claude.md#4
 - (P4 architecture) Phase 3: shared brightness boundary so keys and slider writes are ordered — src: phases/phase-2/reviews/design-codex.md#11

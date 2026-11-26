@@ -41,7 +41,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     self.retryDelayMicroseconds = retryDelayMicroseconds
   }
 
-  /// Retries a sample taken while the display setup changed; throws `inventoryChanged` after 3.
+  /// Samples up to 3 times in total, 20 ms apart, while the display setup changes; then throws `inventoryChanged`.
   public func snapshot() throws -> [Display] {
     for _ in 1..<Self.maximumSampleAttempts {
       do {
@@ -231,9 +231,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
       return Array(displayIDs.prefix(Int(returnedCount)))
     }
 
-    throw DisplayControlError.configurationFailed(
-      "\(apiName) display list was unstable after \(maxAttempts) attempts"
-    )
+    // The list kept changing between its count and values reads: same as an inconsistent sample.
+    throw DisplayControlError.inventoryChanged
   }
 
   private static func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {

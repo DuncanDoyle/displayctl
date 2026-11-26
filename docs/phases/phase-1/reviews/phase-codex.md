@@ -23,6 +23,6 @@ The author reported 160 passing tests, 10 CLI and 150 core, with zero failures a
 | # | Finding | Dimension | Source | Decision | Note |
 |---|---|---|---|---|---|
 | 1 | Disconnect can report success with zero active displays | correctness | reviewer | accept | P1. After a disable, require an active display to remain; otherwise roll back and fail. Regression test removes the other display between check and disable. Sub-phase 1.2. |
-| 2 | Test recovery can turn on a display that was off before the run | architecture | reviewer | reject: only a display already turned off by `displayctl` and absent from the start inventory is affected; turning it on is harmless, and the owner has one external monitor. `connect all` stays the simplest recovery. Pending owner confirmation. | |
+| 2 | Test recovery can turn on a display that was off before the run | architecture | reviewer | reject: only a display already turned off by `displayctl` and absent from the start inventory is affected; turning it on is harmless, and the owner has one external monitor. `connect all` stays the simplest recovery. | Owner confirmed: "Agree. It also does what it says it does: connect all connects all monitors." (2026-11-26) |
 | 3 | HDMI brightness not rechecked with doubled sends | correctness | reviewer | accept | Owner hardware check before close. |
 | 4 | Transaction table exposed as public API | architecture | reviewer | accept | Make it package-visible in sub-phase 1.2 if the CLI test fixture allows; otherwise record why. |
