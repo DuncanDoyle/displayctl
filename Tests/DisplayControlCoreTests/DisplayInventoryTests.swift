@@ -68,7 +68,7 @@ final class DisplayInventoryTests: XCTestCase {
       ) {
         XCTAssertEqual(
           $0 as? DisplayControlError,
-          .configurationFailed("Display inventory changed while sampling; retry"))
+          .inventoryChanged)
       }
     }
   }
@@ -355,8 +355,34 @@ final class DisplayInventoryTests: XCTestCase {
     XCTAssertThrowsError(try inventory.snapshot()) {
       XCTAssertEqual(
         $0 as? DisplayControlError,
-        .configurationFailed("Display inventory changed while sampling; retry"))
+        .inventoryChanged)
     }
+  }
+
+  func testSnapshotRetriesInconsistentSample() throws {
+    let samples = SampleCounter()
+    // First sample: active ID 1 missing from the online list; second sample: consistent and empty.
+    let inventory = DisplayInventory(
+      candidateDetector: UnknownDDCCandidateDetector(), onlineIDs: { [] },
+      activeIDs: { samples.next() == 1 ? [1] : [] }, retryDelayMicroseconds: 0)
+
+    XCTAssertEqual(try inventory.snapshot(), [])
+    XCTAssertEqual(samples.count, 2)
+  }
+
+  func testSnapshotThrowsInventoryChangedAfterRetries() {
+    let samples = SampleCounter()
+    let inventory = DisplayInventory(
+      candidateDetector: UnknownDDCCandidateDetector(), onlineIDs: { [] },
+      activeIDs: {
+        _ = samples.next()
+        return [1]
+      }, retryDelayMicroseconds: 0)
+
+    XCTAssertThrowsError(try inventory.snapshot()) {
+      XCTAssertEqual($0 as? DisplayControlError, .inventoryChanged)
+    }
+    XCTAssertEqual(samples.count, 3)
   }
 
   private func metadata(
@@ -390,4 +416,17 @@ final class DisplayInventoryTests: XCTestCase {
 
 struct UnknownDDCCandidateDetector: DDCCandidateDetecting {
   func capability(for display: Display) -> DDCCapability { .unknown }
+}
+
+/// Counts sampler calls; `next()` returns the 1-based call number.
+private final class SampleCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private(set) var count = 0
+
+  func next() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    count += 1
+    return count
+  }
 }

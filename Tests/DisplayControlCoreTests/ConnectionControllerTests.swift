@@ -171,10 +171,7 @@ final class ConnectionControllerTests: XCTestCase {
     }
     XCTAssertEqual(acquired.wait(timeout: .now() + 2), .success)
     XCTAssertThrowsError(try contender.withLock {}) {
-      guard case .configurationFailed(let message) = $0 as? DisplayControlError else {
-        return XCTFail("unexpected error \($0)")
-      }
-      XCTAssertTrue(message.contains("timed out"))
+      XCTAssertEqual($0 as? DisplayControlError, .lockTimeout)
     }
     release.signal()
     XCTAssertEqual(finished.wait(timeout: .now() + 2), .success)
@@ -259,9 +256,26 @@ final class ConnectionControllerTests: XCTestCase {
       bootSession: { currentBoot }, runtimeIDOwner: { _ in nil })
 
     XCTAssertThrowsError(try controller.disconnect("1")) {
-      assertPostcondition($0, contains: ["changed while sampling", "rollback not needed"])
+      assertPostcondition($0, contains: ["inventoryChanged", "rollback not needed"])
     }
     XCTAssertEqual(hardware.requests, [.init(id: 1, enabled: false)])
+  }
+
+  func testDisconnectFailsAndRollsBackWhenNoDisplayRemainsActive() {
+    let target = fixture(1, active: true)
+    let other = fixture(2, active: true, kind: .external)
+    let store = FakeDisplayStore([target, other])
+    // The other display is unplugged between the last-active check and the disable.
+    store.beforeRequest = { request in
+      guard request == .init(id: 1, enabled: false) else { return }
+      store.displays = [store.displays[0]]
+    }
+
+    XCTAssertThrowsError(try makeController(store).disconnect("1")) {
+      assertPostcondition($0, contains: ["no active display", "rollback enabled true completed"])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
+    XCTAssertTrue(store.displays.contains { $0.runtimeID == 1 && $0.isActive })
   }
 
   func testDisconnectRecordsLedgerEntryBeforeDisabling() throws {

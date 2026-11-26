@@ -140,7 +140,9 @@ final class CLIParserTests: XCTestCase {
       (.ddcServiceAmbiguous, "DDC service match is ambiguous", 69),
       (.ddcUnsupported, "DDC is unsupported", 69), (.ddcTimeout, "DDC operation timed out", 75),
       (.ddcTransport("I2C"), "DDC transport failed: I2C", 75),
-      (.ddcInvalidResponse("checksum"), "Invalid DDC response: checksum", 1),
+      (.ddcInvalidResponse("checksum"), "Invalid DDC response: checksum", 75),
+      (.lockTimeout, "Another displayctl command is running; try again", 75),
+      (.inventoryChanged, "Display setup changed while reading it; try again", 75),
     ]
     for (error, message, code) in cases {
       let result = await CLIApplication(service: StubService(error: error)).execute(

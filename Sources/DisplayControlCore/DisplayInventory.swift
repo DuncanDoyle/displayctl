@@ -21,6 +21,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   private let candidateDetector: any DDCCandidateDetecting
   private let sampleOnlineIDs: @Sendable () throws -> [UInt32]
   private let sampleActiveIDs: @Sendable () throws -> [UInt32]
+  private let retryDelayMicroseconds: useconds_t
 
   public init() {
     self.init(
@@ -31,21 +32,36 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   init(
     candidateDetector: any DDCCandidateDetecting,
     onlineIDs: @escaping @Sendable () throws -> [UInt32] = { try onlineDisplayIDs() },
-    activeIDs: @escaping @Sendable () throws -> [UInt32] = { try activeDisplayIDs() }
+    activeIDs: @escaping @Sendable () throws -> [UInt32] = { try activeDisplayIDs() },
+    retryDelayMicroseconds: useconds_t = 20_000
   ) {
     self.candidateDetector = candidateDetector
     sampleOnlineIDs = onlineIDs
     sampleActiveIDs = activeIDs
+    self.retryDelayMicroseconds = retryDelayMicroseconds
   }
 
+  /// Retries a sample taken while the display setup changed; throws `inventoryChanged` after 3.
   public func snapshot() throws -> [Display] {
+    for _ in 1..<Self.maximumSampleAttempts {
+      do {
+        return try sampleOnce()
+      } catch DisplayControlError.inventoryChanged {
+        usleep(retryDelayMicroseconds)
+      }
+    }
+    return try sampleOnce()
+  }
+
+  private static let maximumSampleAttempts = 3
+
+  private func sampleOnce() throws -> [Display] {
     let onlineIDs = try sampleOnlineIDs()
     let activeIDs = try sampleActiveIDs()
     let activeIDSet = Set(activeIDs)
     // An active ID missing from the online sample means the topology changed between the two calls.
     guard activeIDSet.isSubset(of: onlineIDs) else {
-      throw DisplayControlError.configurationFailed(
-        "Display inventory changed while sampling; retry")
+      throw DisplayControlError.inventoryChanged
     }
     let localizedNames = Self.localizedNames(for: activeIDSet)
 
@@ -108,8 +124,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
       // The active list and CGDisplayIsActive are separate calls; disagreement means the topology moved.
       let isActive = activeIDSet.contains(displayID)
       guard isActive == displayMetadata.isActive else {
-        throw DisplayControlError.configurationFailed(
-          "Display inventory changed while sampling; retry")
+        throw DisplayControlError.inventoryChanged
       }
       let kind: DisplayKind = displayMetadata.isBuiltIn ? .internal : .external
       let fallbackName =

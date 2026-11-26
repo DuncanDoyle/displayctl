@@ -73,10 +73,7 @@ struct DarwinDisplayOperationLock: DisplayOperationLocking {
       }
     }
 
-    throw DisplayControlError.configurationFailed(
-      "flock timed out acquiring display operation lock at \(path) "
-        + "after \(maximumAttempts) attempts"
-    )
+    throw DisplayControlError.lockTimeout
   }
 
   private func lockFailure(_ api: String, path: String, errno code: Int32) -> DisplayControlError {
@@ -379,6 +376,15 @@ public struct ConnectionController: Sendable {
       )
     }
 
+    // The last-active check ran before the disable; another display may have gone away since.
+    if !enabled, !refreshed.contains(where: { $0.isOnline && $0.isActive }) {
+      throw postconditionFailure(
+        "Display \(display.uuid.uuidString) was disabled but no active display remains",
+        display: display,
+        enabled: enabled
+      )
+    }
+
     let matches = refreshed.filter { $0.uuid == display.uuid }
     // macOS drops a disabled display from the online list, so absence means disconnected (D-005).
     if !enabled, matches.isEmpty {
@@ -456,13 +462,14 @@ public struct ConnectionController: Sendable {
 }
 
 /// The Core Graphics calls one display configuration transaction makes; tests inject fakes.
-public struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
+/// Package-visible: only the CLI wiring and its tests use it.
+package struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
   let begin: (UnsafeMutablePointer<CGDisplayConfigRef?>) -> CGError
   let enable: (CGDisplayConfigRef?, CGDirectDisplayID, Bool) throws -> CGError
   let complete: (CGDisplayConfigRef?, CGConfigureOption) -> CGError
   let cancel: (CGDisplayConfigRef?) -> CGError
 
-  public init(
+  package init(
     begin: @escaping (UnsafeMutablePointer<CGDisplayConfigRef?>) -> CGError,
     enable: @escaping (CGDisplayConfigRef?, CGDirectDisplayID, Bool) throws -> CGError,
     complete: @escaping (CGDisplayConfigRef?, CGConfigureOption) -> CGError,
@@ -475,7 +482,7 @@ public struct CoreGraphicsDisplayTransactionFunctions: @unchecked Sendable {
   }
 
   /// The real Core Graphics calls, with `CGSConfigureDisplayEnabled` from the private bridge.
-  public static func live() -> Self { live(bridge: PrivateAPIBridge()) }
+  package static func live() -> Self { live(bridge: PrivateAPIBridge()) }
 
   static func live(bridge: PrivateAPIBridge) -> Self {
     Self(
@@ -499,7 +506,7 @@ public struct CoreGraphicsDisplayConnectionHardware: DisplayConnectionHardware {
   }
 
   /// Creates hardware that runs its transactions through `api`.
-  public init(api: CoreGraphicsDisplayTransactionFunctions) {
+  package init(api: CoreGraphicsDisplayTransactionFunctions) {
     self.api = api
   }
 

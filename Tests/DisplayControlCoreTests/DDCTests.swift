@@ -322,6 +322,38 @@ final class DDCTests: XCTestCase {
     )
   }
 
+  /// Both sides built by production code from the Dell U2720Q's observed values.
+  func testProductionIdentitySelectsDellService() throws {
+    let identity = DDCDisplayIdentity(
+      display: externalDisplay(),
+      cgMetadata: DDCDisplayCGMetadata(
+        serialNumber: 1_113_146_188, vendorID: 4268, productID: 16816))
+    let dell = DDCRegistryMetadataParser.candidate(
+      serviceID: 99,
+      proxyProperties: ["Location": "External", "Unit": 0],
+      framebufferProperties: [
+        "DisplayAttributes": [
+          "ProductAttributes": [
+            "ProductName": "DELL U2720Q", "SerialNumber": 1_113_146_188,
+            "LegacyManufacturerID": 4268, "ProductID": 16816,
+          ]
+        ]
+      ])
+    let other = DDCRegistryMetadataParser.candidate(
+      serviceID: 7,
+      proxyProperties: ["Location": "External", "Unit": 1],
+      framebufferProperties: [
+        "DisplayAttributes": [
+          "ProductAttributes": [
+            "ProductName": "Other", "SerialNumber": 42, "LegacyManufacturerID": 1,
+            "ProductID": 2,
+          ]
+        ]
+      ])
+
+    XCTAssertEqual(try DDCServiceMatcher.select(for: identity, from: [other, dell]).serviceID, 99)
+  }
+
   func testRegistryMetadataParserLeavesMissingIdentityFieldsEmpty() {
     let candidate = DDCRegistryMetadataParser.candidate(
       serviceID: 7,

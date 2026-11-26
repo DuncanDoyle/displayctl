@@ -141,7 +141,7 @@ struct CLIApplication: Sendable {
       displayctl brightness set external 40  # hardware brightness via DDC/CI
       displayctl brightness get external
 
-    Exit codes: 0 ok, 64 usage, 69 unsupported, 75 temporary DDC failure, 1 other.
+    Exit codes: 0 ok, 64 usage, 69 unsupported, 75 temporary (DDC, busy, displays changing; retry), 1 other.
     """
   private let service: any CLIService
   init(service: any CLIService) { self.service = service }
@@ -250,7 +250,7 @@ struct CLIApplication: Sendable {
     switch error {
     case .invalidArguments: 64
     case .unsupportedAPI, .ddcUnsupported, .ddcServiceNotFound, .ddcServiceAmbiguous: 69
-    case .ddcTimeout, .ddcTransport: 75
+    case .ddcTimeout, .ddcTransport, .ddcInvalidResponse, .lockTimeout, .inventoryChanged: 75
     default: 1
     }
   }
@@ -265,6 +265,8 @@ struct CLIApplication: Sendable {
     case .configurationFailed(let message): "Display configuration failed: \(message)"
     case .postconditionFailed(let message): "Display postcondition failed: \(message)"
     case .recoverySkipped(let message): "Recovery skipped: \(message)"
+    case .lockTimeout: "Another displayctl command is running; try again"
+    case .inventoryChanged: "Display setup changed while reading it; try again"
     case .ddcServiceNotFound: "DDC service not found"
     case .ddcServiceAmbiguous: "DDC service match is ambiguous"
     case .ddcUnsupported: "DDC is unsupported"
