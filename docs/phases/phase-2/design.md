@@ -114,28 +114,22 @@ Rows:
 
 ### 6.3 Safety net (`ZeroActiveRecovery`)
 
-Triggers:
-1. App start (covers a launchd restart after a crash).
-2. End of a display reconfiguration (`CGDisplayRegisterReconfigurationCallback`, callbacks without the begin flag).
-3. System wake (`NSWorkspace.shared.notificationCenter`, `didWakeNotification`).
+Two paths lead to the same guarded check (D-014):
+- **Events, the fast path.** App start, system wake (`NSWorkspace.shared.notificationCenter`, `didWakeNotification`) and display reconfiguration (`CGDisplayRegisterReconfigurationCallback`, begin-flag callbacks ignored). Events are hints: the first one schedules a check after a settle period (default 2 s); later events merge into that pending check without moving its deadline. While a recovery episode runs, ordinary events are dropped; the periodic check covers anything they would have seen.
+- **Periodic check, the backstop.** Every 10 s, but only while the ledger has an entry from the current boot (something `displayctl` turned off could need recovery). Each tick reads the usable active count only: the active list plus vendor, model and serial per ID; no inventory, no I/O Registry, no lock. A positive count means nothing to do; a query error means unknown (no action); a confirmed zero starts an episode if none runs and no cooldown is active. One timer with tolerance, no sleep-prevention assertion, no replay of missed ticks, no logging of healthy ticks. The app watches the ledger's directory, so a CLI `disconnect` or `connect` starts or stops the timer; it also reloads the ledger at launch and wake.
 
-On a trigger:
-1. Wait for a settle period (default 2 s) after the last trigger, so transient states during plug or unplug do not count.
-2. Call `recoverIfNoneActive()`. It checks and acts under the operation lock (§5). `nil` means a display is active: done.
-3. Otherwise check the result. Recovery succeeded if a fresh snapshot shows at least one active display. Every failed outcome is logged with its display and reason, including a refused earlier-boot entry and an unreadable ledger (returned as an outcome with no display).
-4. If still no display is active, retry (default 3 attempts in total, 2 s apart). A thrown error, such as a lock timeout while a CLI command runs, counts as a failed attempt.
-5. An inconsistent sample (`inventoryChanged`, thrown once the inventory's 3 samples in total all failed), whether from the locked check or the verification, is not an attempt: it is sampled again after the retry delay, up to 5 times per episode. If those run out, the episode ends as inconclusive.
-6. Log every decision with `os.Logger` (subsystem `displayctl`, category `recovery`), including the trigger that started the episode.
+An episode:
+1. Calls `recoverIfNoneActive()`. It checks and acts under the operation lock (§5); `nil` means a usable display is active: done. When a usable display is active it also drops ledger entries of displays that are already on.
+2. Otherwise checks the result. Recovery succeeded if a fresh snapshot shows a usable active display. Every failed outcome is logged with its display and reason, including a refused earlier-boot entry and an unreadable ledger (an outcome with no display).
+3. Retries if still none is usable (default 3 attempts in total, 2 s apart). A thrown error, such as a lock timeout while a CLI command runs, counts as an attempt.
+4. An inconsistent sample (`inventoryChanged`) is not an attempt: it is sampled again after the retry delay, up to 5 times per episode.
+5. Logs every decision with `os.Logger` (subsystem `displayctl`, category `recovery`), including what started the episode (event or periodic check).
 
-Episodes: the attempts above form one episode, and only one runs at a time. Triggers that arrive during an episode, including callbacks caused by its own enable calls, are dropped; the episode re-checks on its own. After an episode:
-- **Recovered, display active, or inconclusive:** the next trigger starts a new episode as usual.
-- **Failed (still no display active after 3 attempts):** the safety net stays quiet. A wake re-arms it. So does a reconfiguration callback after which the active-display count (a cheap `CGGetActiveDisplayList` count, not a full inventory) is above zero, for example the Dell plugged back in.
+After an episode that ends without a usable display (3 failed attempts, or the inconsistent-sample budget used up), a cooldown of 60 s starts. During it neither events nor ticks start an episode; a wake ends the cooldown and gives a fresh budget for that wake. This bounds recovery's own callbacks without any rule about which event caused which.
 
-This keeps the retry budget bounded without missing the next real undock.
+Observer registration: if `CGDisplayRegisterReconfigurationCallback` fails, the app logs it and the panel shows "Safety net off: display changes are not being watched." The periodic check stays on. The callback context lives for the whole process; the C callback only hands the event to the main actor and returns.
 
-Observer registration is part of the safety net. If `CGDisplayRegisterReconfigurationCallback` returns an error, the app logs it and the panel shows "Safety net off: display changes are not being watched." The callback context lives for the whole process; the C callback only hands the event to the main actor and returns.
-
-"Active" here means a usable active display: the macOS placeholder display that appears when no real display is left (vendor `unkn`, model `virt`, serial 0) never counts (D-012, D-013). The re-arm count uses the same rule. It never disconnects anything and never acts while a usable display is active. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged; see §9.
+"Usable active" means online, active and not the macOS placeholder display that appears when no real display is left (vendor `unkn`, model `virt`, serial 0; D-012, D-013). The safety net never disconnects anything and never starts while a usable display is active; once an episode has started at zero, it may enable every recoverable display, as `connect all` does. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged.
 
 ### 6.4 Process lifecycle and install
 
