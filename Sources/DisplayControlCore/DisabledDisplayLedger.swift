@@ -90,9 +90,9 @@ struct FileDisabledDisplayLedger: DisabledDisplayLedger {
   }
 }
 
-enum BootSession {
+public enum BootSession {
   /// Reads `kern.bootsessionuuid`, which changes on every boot and ignores clock changes.
-  static func current() throws -> String {
+  public static func current() throws -> String {
     var size = 0
     guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 0 else {
       throw failure()

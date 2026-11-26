@@ -6,12 +6,15 @@ let package = Package(
   platforms: [.macOS(.v26)],
   products: [
     .library(name: "DisplayControlCore", targets: ["DisplayControlCore"]),
+    .library(name: "DisplayMenuKit", targets: ["DisplayMenuKit"]),
     .executable(name: "displayctl", targets: ["displayctl"]),
   ],
   targets: [
     .target(name: "DisplayControlCore"),
+    .target(name: "DisplayMenuKit", dependencies: ["DisplayControlCore"]),
     .executableTarget(name: "displayctl", dependencies: ["DisplayControlCore"]),
     .testTarget(name: "DisplayControlCoreTests", dependencies: ["DisplayControlCore"]),
+    .testTarget(name: "DisplayMenuKitTests", dependencies: ["DisplayMenuKit"]),
     .testTarget(name: "displayctlTests", dependencies: ["displayctl"]),
   ]
 )
