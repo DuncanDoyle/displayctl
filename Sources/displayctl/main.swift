@@ -170,7 +170,7 @@ struct CLIApplication: Sendable {
         }.joined()
         return CLIResult(
           stdout: try renderList(displays.filter { !$0.isPlaceholder }, json: json),
-          stderr: placeholderNote + (await ledgerOnlyNote(displays)))
+          stderr: placeholderNote + (await ledgerOnlyNote(displays)) + Self.debugNote())
       case .connect(let selector):
         return CLIResult(stdout: mutation("connected", try await service.connect(selector)))
       case .disconnect(let selector):
@@ -244,6 +244,12 @@ struct CLIApplication: Sendable {
   private func escape(_ value: String) -> String {
     String(String(reflecting: value).dropFirst().dropLast())
   }
+  /// With DISPLAYCTL_DEBUG set, `list` also prints the raw placeholder signals (D-012).
+  private static func debugNote() -> String {
+    guard ProcessInfo.processInfo.environment["DISPLAYCTL_DEBUG"] != nil else { return "" }
+    return DisplayInventory.placeholderDiagnostics().map { "debug: \($0)\n" }.joined()
+  }
+
   private static func failure(_ error: Error) -> CLIResult {
     let typed = error as? DisplayControlError
     return CLIResult(

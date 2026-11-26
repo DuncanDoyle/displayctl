@@ -390,27 +390,20 @@ final class DisplayInventoryTests: XCTestCase {
   private static let unkn: UInt32 = 0x756E_6B6E
   private static let virt: UInt32 = 0x7669_7274
 
-  func testPlaceholderSignatureNeedsAllFourSignals() {
-    func classify(_ vendor: UInt32, _ model: UInt32, _ width: Double, _ height: Double, mode: Bool)
-      -> Bool
-    {
-      DisplayInventory.isPlaceholder(
-        vendorNumber: vendor, modelNumber: model,
-        sizeMillimeters: CGSize(width: width, height: height), hasCurrentMode: mode)
+  func testPlaceholderSignatureNeedsAllThreeSignals() {
+    func classify(_ vendor: UInt32, _ model: UInt32, _ serial: UInt32) -> Bool {
+      DisplayInventory.isPlaceholder(vendorNumber: vendor, modelNumber: model, serialNumber: serial)
     }
     XCTAssertEqual(Self.unkn, 1_970_170_734)
     XCTAssertEqual(Self.virt, 1_986_622_068)
-    XCTAssertTrue(classify(Self.unkn, Self.virt, 0, 0, mode: false))
+    XCTAssertTrue(classify(Self.unkn, Self.virt, 0))
     // Dell U2720Q and the built-in panel.
-    XCTAssertFalse(classify(4268, 16821, 599, 339, mode: true))
-    XCTAssertFalse(classify(1552, 41053, 0, 0, mode: false))
-    // Each signal alone, or three of four, is not enough.
-    XCTAssertFalse(classify(Self.unkn, Self.virt, 599, 339, mode: false))
-    XCTAssertFalse(classify(Self.unkn, Self.virt, 0, 339, mode: false))
-    XCTAssertFalse(classify(Self.unkn, Self.virt, 0, 0, mode: true))
-    XCTAssertFalse(classify(Self.unkn, 16821, 0, 0, mode: false))
-    XCTAssertFalse(classify(4268, Self.virt, 0, 0, mode: false))
-    XCTAssertFalse(classify(4268, 16821, 0, 0, mode: false))
+    XCTAssertFalse(classify(4268, 16821, 1_113_146_188))
+    XCTAssertFalse(classify(1552, 41053, 4_251_086_178))
+    // Two of three is not enough.
+    XCTAssertFalse(classify(Self.unkn, Self.virt, 1))
+    XCTAssertFalse(classify(Self.unkn, 16821, 0))
+    XCTAssertFalse(classify(4268, Self.virt, 0))
   }
 
   func testPlaceholderStaysInSnapshotFlaggedAsReported() throws {
@@ -429,25 +422,6 @@ final class DisplayInventoryTests: XCTestCase {
     XCTAssertTrue(placeholder.isOnline && placeholder.isActive && placeholder.isMain)
     XCTAssertFalse(placeholder.isUsableActive)
     XCTAssertFalse(try XCTUnwrap(ddc.first { $0.runtimeID == 1 }).isPlaceholder)
-  }
-
-  // The placeholder's physical size is under 1 mm, not necessarily exactly zero.
-  func testPlaceholderSizeUnderOneMillimetreCounts() {
-    XCTAssertTrue(
-      DisplayInventory.isPlaceholder(
-        vendorNumber: 1_970_170_734, modelNumber: 1_986_622_068,
-        sizeMillimeters: CGSize(width: 0.3, height: 0.2), hasCurrentMode: false))
-    XCTAssertFalse(
-      DisplayInventory.isPlaceholder(
-        vendorNumber: 1_970_170_734, modelNumber: 1_986_622_068,
-        sizeMillimeters: CGSize(width: 1, height: 0.2), hasCurrentMode: false))
-  }
-
-  // The placeholder may report a mode object of 0×0 pixels instead of no mode at all.
-  func testOnlyAModeWithAPixelSizeCountsAsCurrentMode() {
-    XCTAssertFalse(DisplayInventory.hasUsableMode(pixelWidth: nil, pixelHeight: nil))
-    XCTAssertFalse(DisplayInventory.hasUsableMode(pixelWidth: 0, pixelHeight: 0))
-    XCTAssertTrue(DisplayInventory.hasUsableMode(pixelWidth: 1920, pixelHeight: 1080))
   }
 
   func testPlaceholderSkipsDDCLookup() throws {

@@ -113,33 +113,28 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   }
 
   /// The macOS placeholder signature seen on macOS 27.0.1 (D-012): vendor 'unkn', model 'virt',
-  /// under 1 mm each way and no current mode with a pixel size. A heuristic: all four must hold.
-  static func isPlaceholder(
-    vendorNumber: UInt32, modelNumber: UInt32, sizeMillimeters: CGSize, hasCurrentMode: Bool
-  ) -> Bool {
-    vendorNumber == placeholderVendor && modelNumber == placeholderModel
-      && sizeMillimeters.width < 1 && sizeMillimeters.height < 1 && !hasCurrentMode
+  /// serial 0. Size and mode are not used: they differ between processes for the same display.
+  static func isPlaceholder(vendorNumber: UInt32, modelNumber: UInt32, serialNumber: UInt32)
+    -> Bool
+  {
+    vendorNumber == placeholderVendor && modelNumber == placeholderModel && serialNumber == 0
   }
 
   private static let placeholderVendor: UInt32 = 0x756E_6B6E  // 'unkn'
   private static let placeholderModel: UInt32 = 0x7669_7274  // 'virt'
 
-  /// Reads the placeholder signals from Core Graphics; size and mode only when the IDs match.
   static func isPlaceholder(_ displayID: CGDirectDisplayID) -> Bool {
-    guard CGDisplayVendorNumber(displayID) == placeholderVendor,
-      CGDisplayModelNumber(displayID) == placeholderModel
-    else { return false }
-    return isPlaceholder(
-      vendorNumber: placeholderVendor, modelNumber: placeholderModel,
-      sizeMillimeters: CGDisplayScreenSize(displayID),
-      hasCurrentMode: hasUsableMode(
-        pixelWidth: CGDisplayCopyDisplayMode(displayID)?.pixelWidth,
-        pixelHeight: CGDisplayCopyDisplayMode(displayID)?.pixelHeight))
+    isPlaceholder(
+      vendorNumber: CGDisplayVendorNumber(displayID), modelNumber: CGDisplayModelNumber(displayID),
+      serialNumber: CGDisplaySerialNumber(displayID))
   }
 
-  /// A mode counts only with a pixel size; the placeholder may report a 0×0 mode instead of none.
-  static func hasUsableMode(pixelWidth: Int?, pixelHeight: Int?) -> Bool {
-    (pixelWidth ?? 0) > 0 && (pixelHeight ?? 0) > 0
+  /// The placeholder signals Core Graphics reports for each online display, for diagnostics.
+  public static func placeholderDiagnostics() -> [String] {
+    ((try? onlineDisplayIDs()) ?? []).map { id in
+      "id=\(id) vendor=\(CGDisplayVendorNumber(id)) model=\(CGDisplayModelNumber(id))"
+        + " serial=\(CGDisplaySerialNumber(id)) placeholder=\(isPlaceholder(id))"
+    }
   }
 
   /// Active displays minus placeholders; cheap enough for the safety net's re-arm check.
