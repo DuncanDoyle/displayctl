@@ -235,7 +235,15 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     throw DisplayControlError.inventoryChanged
   }
 
+  /// NSScreen is read on the main thread; a caller on another thread waits for it there.
   private static func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
+    guard Thread.isMainThread else {
+      return DispatchQueue.main.sync { screenNames(for: activeIDs) }
+    }
+    return screenNames(for: activeIDs)
+  }
+
+  private static func screenNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
     let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
 
     return NSScreen.screens.reduce(into: [:]) { result, screen in
