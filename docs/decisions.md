@@ -58,3 +58,9 @@ Hardware testing does the internal display first (the main use case, with the De
 **Decision:** Phase 2 is a menu bar app in a Control Center-style panel: an on/off switch per display and a brightness slider for DDC-capable external displays. It holds the zero-active-display recovery from the old §10.2. It runs as a per-user launchd agent that restarts after a crash and stays stopped after Quit. The keyboard agent becomes Phase 3, without the recovery part. Phase 2 design and plan start while Phase 1 is still open; no Phase 2 code before Phase 1 closes. User chose: "B" (launchd agent), "B" (panel), "Commit and push, start Phase 2 design. I'll check phase 1 later".
 **Alternatives:** Keep the order (keyboard agent first; the user does not need it now); login-item app (no restart after a crash, when the safety net matters most); classic menu with checkmarks (no native slider).
 **Consequences:** Supersedes Phase 1 design §10.2–§10.3 and the Phase 1 guardrail that Phase 2/3 not begin during Phase 1, for design work only. Roadmap reordered.
+
+## D-010 — A reboot restores a disabled display (2026-11-26, phase 1)
+**Context:** D-008 left open whether a reboot restores a display that `displayctl` disabled. The owner ran `disconnect internal` with the Dell attached and rebooted.
+**Decision:** Reboot is a verified last resort: the built-in display came back on its own after the reboot (macOS 27.0.1). The ledger kept its entry from the earlier boot. A later `connect all` found the UUID already active, removed the entry and exited 0. Recovery order stays `connect all`, then reboot. No ledger rule change is needed.
+**Alternatives:** none — observed behaviour.
+**Consequences:** Answers D-008's open question and Phase 2 design §9's reboot risk. After a reboot an earlier-boot entry can linger until the next `connect all` or `connect <that display>`; it is harmless because the display is already active.

@@ -41,7 +41,7 @@ A disconnected display disappears from `list`; `displayctl` remembers it, so `co
 If a screen does not come back:
 
 1. Run `displayctl connect all`.
-2. Reboot only as a last resort. Whether a reboot restores the display is not yet verified, so keep another display connected until it is back.
+2. Reboot only as a last resort. A reboot brings the display back.
 
 Brightness works over HDMI and USB-C on a Dell U2720Q (macOS 27.0.1). Other monitors need DDC/CI enabled in their own menu.
 
@@ -127,7 +127,7 @@ If testing is interrupted or a display stays dark, recover in this order:
 
 1. Run `.build/debug/displayctl connect all`, from another terminal if needed. It tries every online inactive display and every ledger entry, and reports each result. It exits nonzero if anything failed, including an unreadable ledger, but it still tries the online displays. Repeat it if another `displayctl` holds the lock.
 2. Check the result with `.build/debug/displayctl list`.
-3. If a display is still missing, reboot. Logout/login does not help (D-008), and reboot recovery is not yet verified.
+3. If a display is still missing, reboot; that brings it back (D-010). Logout/login does not help (D-008).
 
 A remote shell helps only if it can list the GUI session's displays. A headless shell may see none.
 
@@ -180,7 +180,7 @@ Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun c
 - [x] USB-C: brightness get and set work once DDC requests are sent twice; disconnect and reconnect of the Dell work — observed 2026-11-23 (macOS 27.0.1).
 - [x] Logout/login does not restore a disabled display: the built-in display stayed off through logout and login (D-008) — observed 2026-11-25 (macOS 27.0.1).
 - [x] Manual `displayctl connect all` restored the built-in display from the ledger after that login, exit 0 — observed 2026-11-25 (macOS 27.0.1).
-- [ ] Reboot with a display disabled — not yet tested.
+- [x] A reboot restores a disabled display: the built-in display came back after a reboot; a later `connect all` removed the leftover ledger entry, exit 0 (D-010) — observed 2026-11-26 (macOS 27.0.1).
 
 After the scripted steps, reconnect the monitor over USB-C, run `list`, then `brightness get` and a carefully confirmed `brightness set`. Record supported or unsupported; there is no fallback. Then disconnect the internal display, log out and back in, and run `connect all` once by hand.
 

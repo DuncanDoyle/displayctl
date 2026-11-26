@@ -48,7 +48,7 @@ Throwaway. Answers design §9's open question before the real target exists.
 - [ ] **Step 4:** Load it with a LaunchAgent (label `com.github.duncandoyle.displayctl-menu-spike`, keys as design §6.4) via `launchctl bootstrap gui/$(id -u) <plist>`. Ask the same questions. Then `launchctl bootout gui/$(id -u)/com.github.duncandoyle.displayctl-menu-spike` and remove the plist.
 - [ ] **Step 5:** If either run fails, wrap the binary in `Spike.app/Contents/{MacOS/Spike,Info.plist}` with `LSUIElement = true`, point `ProgramArguments` at `Contents/MacOS/Spike`, and repeat Steps 3–4.
 - [ ] **Step 6:** If the bundle also fails, stop and ask the owner which requirement changes (design §9).
-- [ ] **Step 7:** Record the outcome in `docs/phase-status.md` Notes; if the bundle was needed, add D-010 and Task 6 builds the bundle. Commit.
+- [ ] **Step 7:** Record the outcome in `docs/phase-status.md` Notes; if the bundle was needed, add a decision and Task 6 builds the bundle. Commit.
 
 ---
 

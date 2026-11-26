@@ -138,7 +138,7 @@ Connection changes use this sequence:
 9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005).
 10. Release the display-operation lock.
 
-If configuration fails before completion, the transaction is cancelled. On macOS 27 a session-scoped disable survives logout/login, so logout is not a recovery boundary (D-008). Recovery is `displayctl connect all` from the ledger; whether a reboot restores the display is unverified.
+If configuration fails before completion, the transaction is cancelled. On macOS 27 a session-scoped disable survives logout/login, so logout is not a recovery boundary (D-008). Recovery is `displayctl connect all` from the ledger, then a reboot, which restores the display (D-010).
 
 The operation lock uses Darwin `flock` on a lock file in the logged-in user's temporary directory. It serializes the complete validation and mutation sequence across threads, controller instances, and CLI processes. Acquisition uses bounded waiting and fails clearly rather than hanging indefinitely. The operating system releases the advisory lock when a process exits or crashes.
 
