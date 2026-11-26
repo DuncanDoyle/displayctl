@@ -18,7 +18,9 @@ public struct DisplayConnectionOutcome: Sendable {
 }
 
 /// Recovery saw an active display before its first enable; it ends without acting.
-private struct DisplayBecameActive: Error {}
+private struct DisplayBecameActive: Error {
+  let displays: [Display]
+}
 
 protocol DisplayOperationLocking: Sendable {
   func withLock<T>(_ operation: () throws -> T) throws -> T
@@ -254,14 +256,19 @@ public struct ConnectionController: Sendable {
 
   /// Under the operation lock: nil if a usable display is active (the macOS placeholder does not
   /// count); otherwise connectAll's outcomes, with candidates from the same snapshot. Stops with
-  /// nil if a usable display turns active before the first enable succeeds.
+  /// nil if a usable display turns active before the first enable succeeds. Before returning nil
+  /// it drops the ledger entries of displays that snapshot shows usable-active.
   public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]? {
     try operationLock.withLock {
       let displays = try snapshot.snapshot()
-      guard !displays.contains(where: \.isUsableActive) else { return nil }
+      guard !displays.contains(where: \.isUsableActive) else {
+        removeEntries(activeIn: displays)
+        return nil
+      }
       do {
         return try connectAllLocked(from: displays, stopIfActive: true)
-      } catch is DisplayBecameActive {
+      } catch let active as DisplayBecameActive {
+        removeEntries(activeIn: active.displays)
         return nil
       }
     }
@@ -338,7 +345,7 @@ public struct ConnectionController: Sendable {
   ) throws -> Display {
     let displays = try snapshot.snapshot()
     if stopIfActive, displays.contains(where: \.isUsableActive) {
-      throw DisplayBecameActive()
+      throw DisplayBecameActive(displays: displays)
     }
     let matches = displays.filter { $0.uuid == uuid }
     guard matches.count <= 1 else {
@@ -399,6 +406,16 @@ public struct ConnectionController: Sendable {
       return
     }
     try? ledger.save(entries.filter { $0.uuid != uuid })
+  }
+
+  /// Drops the entries of displays usable-active in `displays`, e.g. one macOS lit on lid open.
+  private func removeEntries(activeIn displays: [Display]) {
+    let active = Set(displays.filter(\.isUsableActive).map(\.uuid))
+    guard let entries = try? ledger.load(), entries.contains(where: { active.contains($0.uuid) })
+    else {
+      return
+    }
+    try? ledger.save(entries.filter { !active.contains($0.uuid) })
   }
 
   private func transition(_ display: Display, enabled: Bool) throws -> Display {

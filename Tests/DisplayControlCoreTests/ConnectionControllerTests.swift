@@ -167,9 +167,11 @@ final class ConnectionControllerTests: XCTestCase {
     let store = FakeDisplayStore([fixture(1, active: false), external])
     // The Dell becomes active right after the locked zero-active check.
     store.displaysAtSnapshot[2] = [fixture(1, active: false), replacing(external, active: true)]
+    let ledger = FakeLedger([entry(for: fixture(1, active: false)), entry(for: external)])
 
-    XCTAssertNil(try makeController(store).recoverIfNoneActive())
+    XCTAssertNil(try makeController(store, ledger: ledger).recoverIfNoneActive())
     XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: fixture(1, active: false))])
   }
 
   func testRecoverAfterCLIConnectWinsLockEnablesNothing() throws {
@@ -210,6 +212,37 @@ final class ConnectionControllerTests: XCTestCase {
     assertSkipped(error, contains: ["runtime ID 1", placeholder(1).uuid.uuidString])
     XCTAssertEqual(store.requests, [])
     XCTAssertEqual(ledger.entries, [entry(for: builtIn)])
+  }
+
+  func testRecoverDropsLedgerEntryOfAnActiveDisplay() throws {
+    // macOS lit the built-in itself after the safety net's enable failed (hardware step 11).
+    let builtIn = fixture(1, active: true)
+    let store = FakeDisplayStore([builtIn])
+    let ledger = FakeLedger([entry(for: builtIn)])
+
+    XCTAssertNil(try makeController(store, ledger: ledger).recoverIfNoneActive())
+    XCTAssertEqual(ledger.entries, [])
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testRecoverKeepsLedgerEntryOfAnOfflineDisplay() throws {
+    let external = fixture(3, active: false, kind: .external)
+    let store = FakeDisplayStore([fixture(1, active: true)])
+    let ledger = FakeLedger([entry(for: external)])
+
+    XCTAssertNil(try makeController(store, ledger: ledger).recoverIfNoneActive())
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testRecoverKeepsLedgerEntryOfAnOnlineInactiveDisplay() throws {
+    let external = fixture(2, active: false, kind: .external)
+    let store = FakeDisplayStore([fixture(1, active: true), external])
+    let ledger = FakeLedger([entry(for: external)])
+
+    XCTAssertNil(try makeController(store, ledger: ledger).recoverIfNoneActive())
+    XCTAssertEqual(ledger.entries, [entry(for: external)])
+    XCTAssertEqual(store.requests, [])
   }
 
   func testDisconnectRefusesWhenTheOnlyOtherActiveDisplayIsThePlaceholder() {
