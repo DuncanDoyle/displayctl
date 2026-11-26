@@ -135,7 +135,7 @@ This keeps the retry budget bounded without missing the next real undock.
 
 Observer registration is part of the safety net. If `CGDisplayRegisterReconfigurationCallback` returns an error, the app logs it and the panel shows "Safety net off: display changes are not being watched." The callback context lives for the whole process; the C callback only hands the event to the main actor and returns.
 
-"Active" here means a usable active display: the macOS placeholder display that appears when no real display is left (vendor `unkn`, model `virt`, 0×0 mm, no display mode) never counts (D-012). The re-arm count uses the same rule. It never disconnects anything and never acts while a usable display is active. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged; see §9.
+"Active" here means a usable active display: the macOS placeholder display that appears when no real display is left (vendor `unkn`, model `virt`, serial 0) never counts (D-012, D-013). The re-arm count uses the same rule. It never disconnects anything and never acts while a usable display is active. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged; see §9.
 
 ### 6.4 Process lifecycle and install
 
@@ -176,8 +176,8 @@ Each step starts with both displays on and the app running unless it says otherw
 7. `kill -9` the app: launchd restarts it and the icon returns.
 8. Quit: the app stays stopped until `kickstart` or the next login.
 9. Safety net, panel closed: built-in off from the panel, close the panel, unplug the Dell. The built-in display comes back without input; the log shows a `reconfiguration` trigger. Over HDMI; USB-C if available.
-10. Startup recovery: Quit the app; turn the built-in off with the CLI. Start the fallback with `--kickstart-after 20`, then unplug the Dell within 10 s. Zero active is established before the kickstart starts the app. The built-in display comes back; the log shows a `launch` trigger and no earlier `reconfiguration` episode.
-11. Wake recovery: built-in off, Dell attached; close the lid; unplug the Dell (the Mac sleeps); wait 10 s; open the lid. The built-in display comes back within 10 s of opening; the log shows which trigger started the episode, and the step passes only if it is `wake` or a `reconfiguration` stamped after the wake.
+10. Startup recovery: Quit the app; turn the built-in off with the CLI; start the fallback with `--kickstart-after 5` (timers count from the moment no usable display is active); unplug the Dell. The built-in display comes back; the log shows a `launch` trigger and no earlier `reconfiguration` episode.
+11. Wake recovery: built-in off, Dell attached; close the lid; unplug the Dell (the Mac sleeps); wait 10 s; open the lid. The built-in display comes back within 10 s of opening; the log shows which trigger started the episode, and the step passes only if it is `wake` or a `reconfiguration` stamped after the wake. Observed route on macOS 27.0.1: with the lid closed the reconfiguration episode enables the built-in but it cannot light, so the episode ends `failed`; macOS lights it on lid open and the wake check finds it active. Either route passes if the built-in is usable within 10 s of opening the lid.
 12. Login: log out and in; the icon appears without manual start.
 
 ## 9. Risks and open questions
@@ -198,6 +198,6 @@ Each step starts with both displays on and the app running unless it says otherw
 
 Phase 2 is complete when:
 - The package builds and all automated tests pass on the target Mac.
-- Hardware steps 1–12 in §8 pass, recorded in README with dates.
+- Hardware steps 1–12 in §8 pass, recorded in README with dates (step 9 over HDMI and USB-C).
 - The README documents install, uninstall, Quit and restart, and recovery.
 - Design and plan match the code; `decisions.md` holds any deviation.
