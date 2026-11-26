@@ -11,8 +11,8 @@ Status: implementing on branch duncandoyle/menuBar (executing-plans, Claude impl
 ### Queue
 - [x] Q0 Owner approves the amended design.md and implementation-plan.md — "Approved" (2026-11-26)
 - [ ] Q1 Task 1 spike: MenuBarExtra from a bare executable under launchd ← CURRENT
-- [ ] Q2 (P4 architecture) Measure snapshot and brightness-set cost (I/O Registry walks) before the slider relies on them — src: phases/phase-1/reviews/design-claude.md#10, phase-claude.md#4
-- [ ] Q3 Task 2 safety net in DisplayControlCore
+- [x] Q2 (P4 architecture) Measure snapshot and brightness-set cost — src: phases/phase-1/reviews/design-claude.md#10, phase-claude.md#4 — 2026-11-26, Dell on USB-C, whole CLI process incl. launch: `list` 40–60 ms, `brightness get` 130–140 ms, `brightness set` (same value) 170–190 ms. One write in flight gives about 5–6 slider updates per second; acceptable, no caching needed now.
+- [x] Q3 Task 2 safety net in DisplayControlCore — 44aa166; 184 tests pass. Choices beyond the plan: internal `drain()` for tests; a wake in a coalesced window wins; a disarmed net re-arms without running when `activeCount() > 0`.
 - [ ] Q4 Task 3 DisplayMenuKit executor, rows, switching
 - [ ] Q5 Task 4 brightness model
 - [ ] Q6 (P3 correctness) set `DDCCapability.confirmed` after a successful read, or remove it — src: phases/phase-1/reviews/design-claude.md#8
@@ -40,7 +40,8 @@ none
 - (P4 architecture) Phase 3: shared brightness boundary so keys and slider writes are ordered — src: phases/phase-2/reviews/design-codex.md#11
 
 ## Notes
-- 2026-11-26: Phase 1 closed (docs/phases/phase-1/phase-1-complete.md). No Phase 2 code was written while it was open (D-009). Phase 1 status notes, including hardware runs 1–4: `git show 860cbea:docs/phase-status.md`.
+- 2026-11-26: Task 1 spike (`.agents-tmp/menubar-spike`): bare SwiftPM binary run from Terminal — icon shown, no Dock icon, panel with switch and slider, onAppear runs on every reopen (owner confirmed). Under launchd (label com.github.duncandoyle.displayctl-menu-spike, design §6.4 keys): state running; SIGKILL → restarted (runs = 2). Visual check under launchd and Quit-stays-stopped pending owner.
+- 2026-11-26: Phase 1 closed (docs/phases/phase-1/phase-1-complete.md). No Phase 2 code was written while it was open (D-009). Phase 1 status notes, including hardware runs 1–4: `git show f39f451:docs/phase-status.md`.
 - 2026-11-25: Phase 2 design + plan reviewed twice by Codex (reviews/design-codex.md, design2-codex.md), triaged. The loop stopped with P2 findings resolved on paper but not re-reviewed, by owner decision ("Stop design reviews here?" → "yes"); the Phase 2 code review must check them.
 - 2026-11-26: Phase 2 design and plan amended after the Phase 1 reviews: typed `lockTimeout`/`inventoryChanged` errors, unsandboxed app, ledger rows per boot (orphans from re-cabling still show).
 - Build/test: `swift test --parallel --scratch-path .agents-tmp/build`.
