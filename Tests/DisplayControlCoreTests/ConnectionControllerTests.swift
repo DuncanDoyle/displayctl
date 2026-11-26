@@ -140,6 +140,40 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(operationLock.acquisitionCount, 1)
   }
 
+  func testRecoverIfNoneActiveReturnsNilWhenADisplayIsActive() throws {
+    let store = FakeDisplayStore([fixture(1, active: true), fixture(2, active: false)])
+
+    XCTAssertNil(try makeController(store).recoverIfNoneActive())
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testRecoverIfNoneActiveEnablesLedgerAndOnlineInactiveAtZero() throws {
+    let online = fixture(1, active: false)
+    let external = fixture(3, active: true, kind: .external)
+    let store = FakeDisplayStore([online])
+    let ledger = FakeLedger([entry(for: external)])
+    store.reactions = [.init(id: 3, enabled: true): [replacing(online, active: true), external]]
+
+    let outcomes = try XCTUnwrap(makeController(store, ledger: ledger).recoverIfNoneActive())
+
+    XCTAssertEqual(outcomes.map(\.display?.uuid), [online.uuid, external.uuid])
+    XCTAssertEqual(try outcomes.map { try $0.result.get().isActive }, [true, true])
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: true), .init(id: 3, enabled: true)])
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  func testRecoverAfterCLIConnectWinsLockEnablesNothing() throws {
+    let store = FakeDisplayStore([fixture(1, active: false), fixture(2, active: false)])
+    let lock = PreemptedOperationLock()
+    let controller = makeController(store, lock: lock)
+    // The CLI's connect takes the lock just before the recovery body runs.
+    lock.beforeNextOperation = { _ = try? controller.connect("1") }
+
+    XCTAssertNil(try controller.recoverIfNoneActive())
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: true)])
+    XCTAssertEqual(store.displays.map(\.isActive), [true, false])
+  }
+
   func testDisplayConnectionOutcomePublicInitializerPreservesTypedFailure() {
     let display = fixture(1, active: false)
     let outcome = DisplayConnectionOutcome(
@@ -860,6 +894,19 @@ private final class FakeOperationLock: DisplayOperationLocking, @unchecked Senda
     lock.lock()
     defer { lock.unlock() }
     acquisitionCount += 1
+    return try operation()
+  }
+}
+
+/// Runs `beforeNextOperation` once, outside the lock, before the next protected operation.
+private final class PreemptedOperationLock: DisplayOperationLocking, @unchecked Sendable {
+  var beforeNextOperation: (() -> Void)?
+
+  func withLock<T>(_ operation: () throws -> T) throws -> T {
+    if let before = beforeNextOperation {
+      beforeNextOperation = nil
+      before()
+    }
     return try operation()
   }
 }

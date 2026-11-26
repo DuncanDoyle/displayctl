@@ -243,36 +243,50 @@ public struct ConnectionController: Sendable {
   /// Attempts every online inactive display and every ledger entry once, in that order. An
   /// unreadable ledger is reported as a last failed outcome; online displays are still attempted.
   public func connectAll() throws -> [DisplayConnectionOutcome] {
-    try operationLock.withLock {
-      var ledgerFailure: DisplayControlError?
-      var entries: [DisabledDisplayEntry] = []
-      do {
-        entries = try ledger.load()
-      } catch {
-        ledgerFailure = error as? DisplayControlError ?? .configurationFailed("\(error)")
-      }
-      var candidates = try snapshot.snapshot()
-        .filter { $0.isOnline && !$0.isActive }
-        .map { display in (display, entries.first { $0.uuid == display.uuid }) }
-      let candidateUUIDs = Set(candidates.map(\.0.uuid))
-      candidates += entries.filter { !candidateUUIDs.contains($0.uuid) }.map {
-        ($0.placeholder, $0)
-      }
+    try operationLock.withLock { try connectAllLocked() }
+  }
 
-      let outcomes = candidates.map { display, entry in
-        let result: Result<Display, DisplayControlError>
-        do {
-          result = .success(try reconnect(display.uuid, entry: entry, acceptAlreadyActive: true))
-        } catch let error as DisplayControlError {
-          result = .failure(error)
-        } catch {
-          result = .failure(.configurationFailed(String(describing: error)))
-        }
-        return DisplayConnectionOutcome(display: display, result: result)
+  /// Under the operation lock: nil if any display is online and active; otherwise connectAll's
+  /// outcomes.
+  public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]? {
+    try operationLock.withLock {
+      guard !(try snapshot.snapshot()).contains(where: { $0.isOnline && $0.isActive }) else {
+        return nil
       }
-      guard let ledgerFailure else { return outcomes }
-      return outcomes + [DisplayConnectionOutcome(display: nil, result: .failure(ledgerFailure))]
+      return try connectAllLocked()
     }
+  }
+
+  /// The body of `connectAll`; the caller holds the operation lock.
+  private func connectAllLocked() throws -> [DisplayConnectionOutcome] {
+    var ledgerFailure: DisplayControlError?
+    var entries: [DisabledDisplayEntry] = []
+    do {
+      entries = try ledger.load()
+    } catch {
+      ledgerFailure = error as? DisplayControlError ?? .configurationFailed("\(error)")
+    }
+    var candidates = try snapshot.snapshot()
+      .filter { $0.isOnline && !$0.isActive }
+      .map { display in (display, entries.first { $0.uuid == display.uuid }) }
+    let candidateUUIDs = Set(candidates.map(\.0.uuid))
+    candidates += entries.filter { !candidateUUIDs.contains($0.uuid) }.map {
+      ($0.placeholder, $0)
+    }
+
+    let outcomes = candidates.map { display, entry in
+      let result: Result<Display, DisplayControlError>
+      do {
+        result = .success(try reconnect(display.uuid, entry: entry, acceptAlreadyActive: true))
+      } catch let error as DisplayControlError {
+        result = .failure(error)
+      } catch {
+        result = .failure(.configurationFailed(String(describing: error)))
+      }
+      return DisplayConnectionOutcome(display: display, result: result)
+    }
+    guard let ledgerFailure else { return outcomes }
+    return outcomes + [DisplayConnectionOutcome(display: nil, result: .failure(ledgerFailure))]
   }
 
   /// Records the display in the ledger, then disables it; a ledger failure leaves it untouched.
