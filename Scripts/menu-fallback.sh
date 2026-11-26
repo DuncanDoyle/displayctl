@@ -1,7 +1,7 @@
 #!/bin/bash
 # Independent fallback for the Phase 2 hardware tests (design §8). Runs detached, logs every
-# change in the active-display count, optionally starts the menu app, and from a set time on
-# retries `displayctl connect all` until a display is active or a hard deadline passes.
+# change in the active-display count and, once no display is active, can start the menu app
+# and later retries `displayctl connect all` until a display is active or a deadline passes.
 # Written for macOS /bin/bash 3.2.
 set -euo pipefail
 
@@ -14,6 +14,8 @@ LOG_DIR="$HOME/Library/Logs/displayctl-menu-fallback"
 # Proof mode: run connect all once even while a display is active, to show the detached
 # process can restore a display in the GUI session.
 EVEN_IF_ACTIVE=0
+# Without a dark period within this many seconds the fallback exits.
+WAIT_FOR_DARK=600
 
 usage() {
   echo "usage: $0 [--even-if-active] [--kickstart-after S] [--connect-all-after S] [--deadline S] [--displayctl PATH]" >&2
@@ -47,11 +49,11 @@ active_count() {
 }
 
 run_child() {
-  local log="$1" start last count elapsed kicked=0
+  local log="$1" start last count elapsed dark_at="" t kicked=0
   echo $$ > "$log.pid"
   start="$(now)"
   last="unset"
-  echo "$(stamp) fallback started (kickstart-after=${KICKSTART_AFTER:-none}, connect-all-after=$CONNECT_ALL_AFTER, deadline=$DEADLINE)"
+  echo "$(stamp) fallback started (kickstart-after=${KICKSTART_AFTER:-none}, connect-all-after=$CONNECT_ALL_AFTER, deadline=$DEADLINE; times count from when no display is active)"
   : > "$log.ready"
   while :; do
     elapsed=$(( $(now) - start ))
@@ -60,32 +62,49 @@ run_child() {
       echo "$(stamp) t=${elapsed}s active displays: $count"
       last="$count"
     fi
-    if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$elapsed" -ge "$KICKSTART_AFTER" ]; then
-      kicked=1
-      echo "$(stamp) t=${elapsed}s kickstart $LABEL"
-      launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
-    fi
-    if [ "$elapsed" -ge "$CONNECT_ALL_AFTER" ]; then
-      if [ "$EVEN_IF_ACTIVE" -eq 1 ]; then
-        echo "$(stamp) t=${elapsed}s proof mode: running connect all"
+    if [ "$EVEN_IF_ACTIVE" -eq 1 ]; then
+      if [ "$elapsed" -ge "$CONNECT_ALL_AFTER" ]; then
+        echo "$(stamp) proof mode: running connect all"
         "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
         echo "$(stamp) active displays after: $(active_count). Done."
         return 0
       fi
-      if [ "$count" -gt 0 ]; then
-        echo "$(stamp) t=${elapsed}s a display is active; fallback did nothing. Done."
+      sleep 1
+      continue
+    fi
+    if [ -z "$dark_at" ]; then
+      if [ "$count" = "0" ]; then
+        dark_at="$(now)"
+        echo "$(stamp) no active display: timers start now"
+      elif [ "$elapsed" -ge "$WAIT_FOR_DARK" ]; then
+        echo "$(stamp) no display went dark within ${WAIT_FOR_DARK}s; fallback exits."
         return 0
       fi
-      echo "$(stamp) t=${elapsed}s no active display: running connect all"
+      sleep 1
+      continue
+    fi
+    t=$(( $(now) - dark_at ))
+    if [ "$count" -gt 0 ]; then
+      echo "$(stamp) a display is active again ${t}s after going dark. Done."
+      return 0
+    fi
+    if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$t" -ge "$KICKSTART_AFTER" ]; then
+      kicked=1
+      echo "$(stamp) dark+${t}s kickstart $LABEL"
+      launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
+    fi
+    if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
+      echo "$(stamp) dark+${t}s still no active display: running connect all"
       "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
     fi
-    if [ "$elapsed" -ge "$DEADLINE" ]; then
-      echo "$(stamp) t=${elapsed}s deadline reached; giving up. Replug the external display or reboot."
+    if [ "$t" -ge "$DEADLINE" ]; then
+      echo "$(stamp) dark+${t}s deadline reached; giving up. Replug the external display or reboot."
       return 1
     fi
     sleep 1
   done
 }
+
 
 if [ -n "$CHILD" ]; then
   run_child "$CHILD"
