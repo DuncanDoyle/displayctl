@@ -40,10 +40,27 @@ now() { date +%s; }
 limit() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
 stamp() { date '+%H:%M:%S'; }
 
+# Seconds left to the hard deadline once no display is active; empty before that.
+time_left() {
+  if [ -n "${dark_at:-}" ]; then echo $(( dark_at + DEADLINE - $(now) )); fi
+}
+
+# Like limit, capped by the time left; does not start the command once the deadline has passed.
+bounded() {
+  local secs="$1" left
+  shift
+  left="$(time_left)"
+  if [ -n "$left" ]; then
+    if [ "$left" -le 0 ]; then return 124; fi
+    if [ "$left" -lt "$secs" ]; then secs="$left"; fi
+  fi
+  limit "$secs" "$@"
+}
+
 # Number of displays `displayctl list` reports as active; -1 when list fails.
 active_count() {
   local out
-  if ! out="$(limit 10 "$DISPLAYCTL" list 2>/dev/null)"; then
+  if ! out="$(bounded 10 "$DISPLAYCTL" list 2>/dev/null)"; then
     echo -1
     return
   fi
@@ -63,9 +80,13 @@ run_child() {
   fi
   : > "$log.ready"
   while :; do
+    if [ -n "$dark_at" ] && [ "$(time_left)" -le 0 ]; then
+      echo "$(stamp) dark+$(( $(now) - dark_at ))s deadline reached; giving up. Replug the external display or reboot."
+      return 1
+    fi
     elapsed=$(( $(now) - start ))
     count="$(active_count)"
-    listing="$(limit 10 "$DISPLAYCTL" list 2>&1 || true)"
+    listing="$(bounded 10 "$DISPLAYCTL" list 2>&1 || true)"
     if [ "$listing" != "$last" ]; then
       echo "$(stamp) t=${elapsed}s active displays: $count"
       printf "%s\n" "$listing" | sed "s/^/$(stamp)   /"
@@ -100,15 +121,11 @@ run_child() {
     if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$t" -ge "$KICKSTART_AFTER" ]; then
       kicked=1
       echo "$(stamp) dark+${t}s kickstart $LABEL"
-      limit 10 launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
+      bounded 10 launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
     fi
     if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
       echo "$(stamp) dark+${t}s still no active display: running connect all"
-      limit 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
-    fi
-    if [ "$t" -ge "$DEADLINE" ]; then
-      echo "$(stamp) dark+${t}s deadline reached; giving up. Replug the external display or reboot."
-      return 1
+      bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
     fi
     sleep 1
   done
@@ -128,7 +145,8 @@ LOG="$LOG_DIR/run.$(date +%Y%m%d-%H%M%S).log"
     $( [ "$EVEN_IF_ACTIVE" -eq 1 ] && echo --even-if-active ) \
     ${KICKSTART_AFTER:+--kickstart-after "$KICKSTART_AFTER"} \
     >> "$LOG" 2>&1 < /dev/null & )
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+# The readiness probe may take its full 10 s list limit, so wait 12 s before reporting failure.
+for _ in $(seq 1 120); do
   [ -e "$LOG.ready" ] && break
   sleep 0.1
 done
