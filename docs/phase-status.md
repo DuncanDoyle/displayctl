@@ -13,7 +13,7 @@ Status: implementing on branch duncandoyle/menuBar (executing-plans, Claude impl
 - [ ] Q1 Task 1 spike: MenuBarExtra from a bare executable under launchd ← CURRENT
 - [x] Q2 (P4 architecture) Measure snapshot and brightness-set cost — src: phases/phase-1/reviews/design-claude.md#10, phase-claude.md#4 — 2026-11-26, Dell on USB-C, whole CLI process incl. launch: `list` 40–60 ms, `brightness get` 130–140 ms, `brightness set` (same value) 170–190 ms. One write in flight gives about 5–6 slider updates per second; acceptable, no caching needed now.
 - [x] Q3 Task 2 safety net in DisplayControlCore — 44aa166; 184 tests pass. Choices beyond the plan: internal `drain()` for tests; a wake in a coalesced window wins; a disarmed net re-arms without running when `activeCount() > 0`.
-- [ ] Q4 Task 3 DisplayMenuKit executor, rows, switching
+- [x] Q4 Task 3 DisplayMenuKit executor, rows, switching — 2f8a9d7; 204 tests pass. Choices beyond the plan: a failed snapshot keeps the old rows; errors are pruned with their rows; `BootSession.current()` public; `Fakes.swift` test helper.
 - [ ] Q5 Task 4 brightness model
 - [ ] Q6 (P3 correctness) set `DDCCapability.confirmed` after a successful read, or remove it — src: phases/phase-1/reviews/design-claude.md#8
 - [ ] Q7 Task 5 displayctl-menu app
