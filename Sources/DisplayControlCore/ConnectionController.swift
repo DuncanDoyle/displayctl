@@ -353,7 +353,8 @@ public struct ConnectionController: Sendable {
     }
 
     let result: Display
-    if let online = matches.first {
+    // The placeholder is never a reconnect target; its entry takes the offline path below.
+    if let online = matches.first, !online.isPlaceholder {
       if online.isActive {
         guard acceptAlreadyActive else {
           throw DisplayControlError.invalidState("Display \(online.runtimeID) is already active")
@@ -383,7 +384,10 @@ public struct ConnectionController: Sendable {
     by uuid: UUID,
     in displays: [Display]
   ) throws {
-    if let holder = displays.first(where: { $0.runtimeID == runtimeID && $0.uuid != uuid }) {
+    // The placeholder holds its runtime ID even when the entry carries its UUID.
+    if let holder = displays.first(where: {
+      $0.runtimeID == runtimeID && ($0.uuid != uuid || $0.isPlaceholder)
+    }) {
       throw DisplayControlError.recoverySkipped(
         "Display \(uuid.uuidString) is offline and its recorded runtime ID \(runtimeID) is now "
           + "held by display \(holder.uuid.uuidString)")

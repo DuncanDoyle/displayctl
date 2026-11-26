@@ -103,6 +103,30 @@ final class PanelModelBrightnessTests: XCTestCase {
       model.brightness(for: dellID), BrightnessState(percent: 45, sliderValue: 45, error: nil))
   }
 
+  func testReopenReadResumingAfterWritesFinishDoesNotOverwriteSlider() async {
+    let writeGate = brightness.holdWrite(0)
+    let model = model(FakeOperations([builtIn(), dell()]))
+    await model.panelOpened()
+
+    model.setBrightness(10, for: dellID)
+    await writeGate.arrived()
+    model.setBrightness(45, for: dellID)
+    model.panelClosed()
+    // The reopen read samples 10 before the 45 write reaches the monitor.
+    brightness.setRead(dellID, .success(10))
+    let readGate = brightness.holdRead(1)
+    let reopen = Task { await model.panelOpened() }
+    await readGate.arrived()
+    writeGate.open()
+    await model.coalescers[dellID]?.idle()
+    readGate.open()
+    await reopen.value
+
+    XCTAssertEqual(brightness.writes, [10, 45])
+    XCTAssertEqual(
+      model.brightness(for: dellID), BrightnessState(percent: 45, sliderValue: 45, error: nil))
+  }
+
   func testDisplayLeavingInvalidatesPendingWrite() async {
     let gate = brightness.holdWrite(0)
     let operations = FakeOperations([builtIn(), dell()])

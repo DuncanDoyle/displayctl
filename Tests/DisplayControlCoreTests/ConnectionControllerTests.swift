@@ -313,6 +313,33 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(store.requests, [])
   }
 
+  func testConnectByUUIDNeverTargetsThePlaceholderThroughItsLedgerEntry() {
+    let store = FakeDisplayStore([fixture(1, active: true), placeholder(12)])
+    let ledger = FakeLedger([entry(for: placeholder(12))])
+    let selector = placeholder(12).uuid.uuidString
+
+    XCTAssertThrowsError(try makeController(store, ledger: ledger).connect(selector)) {
+      assertSkipped($0, contains: ["runtime ID 12", selector])
+    }
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: placeholder(12))])
+  }
+
+  func testConnectAllNeverReportsThePlaceholderAsConnected() throws {
+    let store = FakeDisplayStore([fixture(1, active: true), placeholder(12)])
+    let ledger = FakeLedger([entry(for: placeholder(12))])
+
+    let outcomes = try makeController(store, ledger: ledger).connectAll()
+
+    XCTAssertEqual(outcomes.map(\.display?.uuid), [placeholder(12).uuid])
+    guard case .failure(let error) = outcomes[0].result else {
+      return XCTFail("placeholder reported as connected")
+    }
+    assertSkipped(error, contains: ["runtime ID 12"])
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: placeholder(12))])
+  }
+
   func testRollbackSkipsWhenThePlaceholderHoldsTheSavedID() {
     let external = fixture(1, active: true, kind: .external)
     let other = fixture(2, active: true)

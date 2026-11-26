@@ -30,7 +30,8 @@ final class SystemObservers {
       forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
     ) { [weak self] _ in
       let arrival = ContinuousClock.now
-      MainActor.assumeIsolated { self?.handle(.wake, at: arrival) }
+      let count = DisplayInventory.usableActiveDisplayCount()
+      MainActor.assumeIsolated { self?.handle(.wake, at: arrival, count: count) }
     }
 
     let scheduler = scheduler
@@ -38,17 +39,19 @@ final class SystemObservers {
     Task { await scheduler.trigger(.launch, at: arrival) }
   }
 
-  /// `arrival` is stamped when macOS reports the event, so the scheduler can drop it by that time.
-  fileprivate func handle(_ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant) {
-    logger.notice("trigger \(trigger.rawValue, privacy: .public)")
+  /// `arrival` and the usable `count` are taken when macOS reports the event, before any hop.
+  fileprivate func handle(
+    _ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant, count: Int
+  ) {
+    logger.notice("trigger \(trigger.rawValue, privacy: .public) count \(count)")
     let scheduler = scheduler
     let model = model
-    Task { await scheduler.trigger(trigger, at: arrival) }
+    Task { await scheduler.trigger(trigger, at: arrival, activeCount: count) }
     Task { await model.refresh() }
   }
 }
 
-/// Nonisolated C callback: skips begin events and hands the rest to the main actor.
+/// Nonisolated C callback: skips begin events, samples the usable count, hands off to the main actor.
 private func displaysReconfigured(
   _ display: CGDirectDisplayID, _ flags: CGDisplayChangeSummaryFlags,
   _ context: UnsafeMutableRawPointer?
@@ -56,5 +59,6 @@ private func displaysReconfigured(
   guard !flags.contains(.beginConfigurationFlag), let context else { return }
   let observers = Unmanaged<SystemObservers>.fromOpaque(context).takeUnretainedValue()
   let arrival = ContinuousClock.now
-  Task { @MainActor in observers.handle(.reconfiguration, at: arrival) }
+  let count = DisplayInventory.usableActiveDisplayCount()
+  Task { @MainActor in observers.handle(.reconfiguration, at: arrival, count: count) }
 }

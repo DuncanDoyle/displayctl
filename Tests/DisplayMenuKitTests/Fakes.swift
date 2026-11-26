@@ -158,6 +158,7 @@ final class FakeBrightness: BrightnessOperating {
     var readResults: [UUID: Result<Int, DisplayControlError>] = [:]
     var writeGates: [Int: Gate] = [:]
     var writeErrors: [Int: DisplayControlError] = [:]
+    var readGates: [Int: Gate] = [:]
   }
   private let state = Mutex(State())
 
@@ -178,11 +179,21 @@ final class FakeBrightness: BrightnessOperating {
     state.withLock { $0.writeErrors[call] = error }
   }
 
+  /// Holds a read call after it sampled its result.
+  func holdRead(_ call: Int) -> Gate {
+    let gate = Gate()
+    state.withLock { $0.readGates[call] = gate }
+    return gate
+  }
+
   func percent(for uuid: UUID) async throws -> Int {
-    try state.withLock { state in
+    let (result, gate) = state.withLock { state in
+      let call = state.reads.count
       state.reads.append(uuid)
-      return state.readResults[uuid] ?? .success(40)
-    }.get()
+      return (state.readResults[uuid] ?? .success(40), state.readGates[call])
+    }
+    await gate?.pass()
+    return try result.get()
   }
 
   func set(_ percent: Int, for uuid: UUID) async throws {

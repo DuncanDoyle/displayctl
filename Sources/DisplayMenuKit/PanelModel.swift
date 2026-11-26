@@ -28,9 +28,11 @@ public final class PanelModel {
   @ObservationIgnored private var unreadIDs: Set<UUID> = []
   /// Last value seen per display this run, kept after its row leaves.
   @ObservationIgnored private var lastKnown: [UUID: Int] = [:]
-  /// A read result applies only if no newer read or slider value came after it and no write runs.
+  /// A read result applies only if no newer read started, no write ran at its start or end, and no
+  /// slider value was submitted during it.
   @ObservationIgnored private var readTokens: [UUID: Int] = [:]
   @ObservationIgnored private var nextReadToken = 0
+  @ObservationIgnored private var submissions: [UUID: Int] = [:]
 
   private struct Loaded {
     var displays: [Display]
@@ -148,14 +150,18 @@ public final class PanelModel {
 
   private func read(_ id: UUID) async {
     let token = takeReadToken(for: id)
+    let submitted = submissions[id, default: 0]
+    let writingAtStart = coalescers[id]?.isWriting == true
     let result: Result<Int, any Error>
     do {
       result = .success(try await brightness.percent(for: id))
     } catch {
       result = .failure(error)
     }
-    // A write still in flight makes the read stale; the slider keeps the submitted value.
-    guard readTokens[id] == token, coalescers[id]?.isWriting != true else { return }
+    // Any write during the read makes it stale; the slider keeps the submitted value.
+    guard readTokens[id] == token, !writingAtStart, submissions[id, default: 0] == submitted,
+      coalescers[id]?.isWriting != true
+    else { return }
     switch result {
     case .success(let percent):
       lastKnown[id] = percent
@@ -212,7 +218,7 @@ extension PanelModel {
   public func setBrightness(_ percent: Int, for id: UUID) {
     guard sliderIDs.contains(id) else { return }
     // A read still in flight must not move the slider back.
-    _ = takeReadToken(for: id)
+    submissions[id, default: 0] += 1
     lastKnown[id] = percent
     brightnessStates[id] = BrightnessState(
       percent: percent, sliderValue: percent, error: brightnessStates[id]?.error)

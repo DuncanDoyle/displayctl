@@ -14,7 +14,8 @@ public enum RecoveryOutcome: Equatable, Sendable {
   case recovered(attempts: Int)
   /// No display was active after the last attempt.
   case failed(attempts: Int)
-  /// The display list kept changing for every sample this episode allows.
+  /// The display list kept changing for every sample this episode allows, or every attempt threw
+  /// before a locked check saw zero usable displays.
   case inconclusive
 }
 
@@ -55,6 +56,8 @@ public struct ZeroActiveRecovery: Sendable {
     log("episode started by \(trigger.rawValue)")
     var attempts = 0
     var inconsistentSamples = 0
+    // Only a locked check that returned outcomes has seen zero usable displays; .failed needs one.
+    var sawZeroActive = false
 
     // Counts an inconsistent sample; true when the episode has none left.
     func sampleBudgetSpent() -> Bool {
@@ -74,7 +77,9 @@ public struct ZeroActiveRecovery: Sendable {
       } catch {
         attempts += 1
         log("attempt \(attempts) failed: \(error)")
-        if attempts >= maxAttempts { return finish(.failed(attempts: attempts)) }
+        if attempts >= maxAttempts {
+          return finish(sawZeroActive ? .failed(attempts: attempts) : .inconclusive)
+        }
         await sleep(retryDelay)
         continue
       }
@@ -84,6 +89,7 @@ public struct ZeroActiveRecovery: Sendable {
         return finish(attempts == 0 ? .displayActive : .recovered(attempts: attempts))
       }
       attempts += 1
+      sawZeroActive = true
       logFailures(outcomes, attempt: attempts)
 
       var verified = false
@@ -121,7 +127,8 @@ public struct ZeroActiveRecovery: Sendable {
   }
 }
 
-/// Debounces triggers (settle), runs one episode at a time, drops triggers that arrived during one.
+/// Debounces triggers (settle), runs one episode at a time, drops triggers that arrived during one;
+/// after .displayActive such triggers start one more episode instead.
 /// After .failed only .wake, or a .reconfiguration seeing activeCount() > 0, re-arms it.
 /// `activeCount` counts usable displays: the macOS placeholder must not count (D-012).
 public actor RecoveryScheduler {
@@ -131,7 +138,7 @@ public actor RecoveryScheduler {
   private let sleep: @Sendable (Duration) async throws -> Void
   private let onOutcome: @Sendable (RecoveryOutcome) -> Void
 
-  private var generation = 0
+  private(set) var generation = 0
   private var latestTrigger = RecoveryTrigger.launch
   private var wakeInWindow = false
   private var running = false
@@ -139,6 +146,9 @@ public actor RecoveryScheduler {
   /// A .reconfiguration that arrived while disarmed saw an active display.
   private var activeSeenWhileDisarmed = false
   private var lastEpisodeEnd: ContinuousClock.Instant?
+  private var lastOutcome: RecoveryOutcome?
+  /// A trigger arrived while the current episode ran.
+  private var changedDuringEpisode = false
   private var tasks: [Int: Task<Void, Never>] = [:]
 
   public init(
@@ -155,16 +165,24 @@ public actor RecoveryScheduler {
     self.onOutcome = onOutcome
   }
 
-  /// `arrival` is when macOS reported the event; one from before the last episode ended is dropped.
+  /// `arrival` is when macOS reported the event; one from before the last episode ended is dropped,
+  /// unless that episode ended .displayActive. `arrivalCount` is the usable count sampled then.
   public func trigger(
-    _ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant = .now
+    _ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant = .now,
+    activeCount arrivalCount: Int? = nil
   ) async {
-    guard !arrivedDuringEpisode(arrival) else { return }
-    if disarmed, trigger == .reconfiguration, await activeCount() > 0 {
-      activeSeenWhileDisarmed = true
+    guard !belongsToEpisode(arrival) else { return }
+    if disarmed, trigger == .reconfiguration {
+      let count: Int
+      if let arrivalCount { count = arrivalCount } else { count = await activeCount() }
+      if count > 0 { activeSeenWhileDisarmed = true }
     }
     // An episode may have run while the count was taken.
-    guard !arrivedDuringEpisode(arrival) else { return }
+    guard !belongsToEpisode(arrival) else { return }
+    startWindow(trigger)
+  }
+
+  private func startWindow(_ trigger: RecoveryTrigger) {
     generation += 1
     latestTrigger = trigger
     wakeInWindow = wakeInWindow || trigger == .wake
@@ -204,15 +222,25 @@ public actor RecoveryScheduler {
     disarmed = false
     activeSeenWhileDisarmed = false
     running = true
+    changedDuringEpisode = false
     let outcome = await recovery.run(trigger: trigger)
     running = false
     lastEpisodeEnd = .now
+    lastOutcome = outcome
     if case .failed = outcome { disarmed = true }
+    // .displayActive enabled nothing, so an event during it is a real change: check once more.
+    if outcome == .displayActive, changedDuringEpisode { startWindow(.reconfiguration) }
     onOutcome(outcome)
   }
 
-  private func arrivedDuringEpisode(_ arrival: ContinuousClock.Instant) -> Bool {
-    running || lastEpisodeEnd.map { arrival < $0 } ?? false
+  /// True when the trigger arrived during an episode or was stamped before the last one ended.
+  private func belongsToEpisode(_ arrival: ContinuousClock.Instant) -> Bool {
+    if running {
+      changedDuringEpisode = true
+      return true
+    }
+    guard let lastEpisodeEnd, arrival < lastEpisodeEnd else { return false }
+    return lastOutcome != .displayActive
   }
 
   private func removeTask(_ id: Int) {

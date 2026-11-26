@@ -80,6 +80,17 @@ final class ZeroActiveRecoveryTests: XCTestCase {
     XCTAssertEqual(durations, [.seconds(2), .seconds(2)])
   }
 
+  func testOnlyThrownAttemptsEndInconclusive() async {
+    // No locked check succeeded, so zero usable displays was never observed.
+    let connector = FakeConnector([.failure(.lockTimeout)])
+    let sleeper = ManualSleeper()
+
+    let outcome = await drive(recovery(connector: connector, sleeper: sleeper), sleeper)
+
+    XCTAssertEqual(outcome, .inconclusive)
+    XCTAssertEqual(connector.calls, 3)
+  }
+
   func testGivesUpAfterMaxAttempts() async {
     let failure = DisplayConnectionOutcome(
       display: display(1, active: false), result: .failure(.postconditionFailed("stuck")))
@@ -159,10 +170,11 @@ final class RecoverySchedulerTests: XCTestCase {
     XCTAssertEqual(harness.outcomes.values, [.displayActive])
   }
 
-  func testTriggerDuringRunIsDropped() async {
+  func testTriggerDuringRecoveredRunIsDropped() async {
     let gate = Gate()
-    let connector = FakeConnector([.success(nil)]) { _ in await gate.pass() }
-    let harness = SchedulerHarness(connector: connector)
+    let connector = FakeConnector([.success([enabled(1)])]) { _ in await gate.pass() }
+    let harness = SchedulerHarness(
+      connector: connector, sampler: ScriptedSampler([.success([display(1, active: true)])]))
 
     await harness.scheduler.trigger(.launch)
     _ = await harness.settle.waitForSleeps(1)
@@ -175,7 +187,36 @@ final class RecoverySchedulerTests: XCTestCase {
 
     XCTAssertEqual(pending, 0)
     XCTAssertEqual(connector.calls, 1)
-    XCTAssertEqual(harness.outcomes.values, [.displayActive])
+    XCTAssertEqual(harness.outcomes.values, [.recovered(attempts: 1)])
+  }
+
+  func testTriggerDuringDisplayActiveRunStartsOneMoreEpisode() async {
+    // The Dell is active at the check, then unplugged while the episode still runs.
+    let gate = Gate()
+    let connector = FakeConnector([.success(nil), .success([enabled(1)])]) { _ in
+      await gate.pass()
+    }
+    let harness = SchedulerHarness(
+      connector: connector, sampler: ScriptedSampler([.success([display(1, active: true)])]))
+
+    await harness.scheduler.trigger(.launch)
+    _ = await harness.settle.waitForSleeps(1)
+    await harness.settle.advanceAll()
+    await gate.waitUntilEntered()
+    await harness.scheduler.trigger(.reconfiguration)
+    await gate.open()
+    await harness.outcomes.waitForCount(1)
+    // Two windows: the launch and the follow-up; without one, drain only.
+    if await harness.scheduler.generation == 2 {
+      await harness.settleAndDrain(sleeps: 1)
+    } else {
+      await harness.scheduler.drain()
+    }
+
+    XCTAssertEqual(connector.calls, 2)
+    XCTAssertEqual(harness.outcomes.values, [.displayActive, .recovered(attempts: 1)])
+    let idle = await harness.scheduler.isIdle
+    XCTAssertTrue(idle)
   }
 
   func testFailedEnableEmittingCallbackDuringRunStillEnds() async {
@@ -264,6 +305,20 @@ final class RecoverySchedulerTests: XCTestCase {
     await harness.scheduler.trigger(.reconfiguration)
     harness.activeCount.value = 0
     await harness.scheduler.trigger(.reconfiguration)
+    await harness.settleAndDrain(sleeps: 2)
+
+    XCTAssertEqual(harness.connector.calls, 6)
+    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+  }
+
+  func testCountSampledAtArrivalRearmsAfterFailure() async {
+    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
+    await harness.fire(.launch)
+
+    // Plug and unplug were sampled when macOS reported them; the live count already reads 0.
+    harness.activeCount.value = 0
+    await harness.scheduler.trigger(.reconfiguration, activeCount: 1)
+    await harness.scheduler.trigger(.reconfiguration, activeCount: 0)
     await harness.settleAndDrain(sleeps: 2)
 
     XCTAssertEqual(harness.connector.calls, 6)
@@ -421,12 +476,33 @@ private actor Gate {
 }
 
 private final class Recorder<Value: Sendable>: Sendable {
-  private let storage = Mutex<[Value]>([])
+  private struct State {
+    var values: [Value] = []
+    var waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+  }
+  private let storage = Mutex(State())
 
-  var values: [Value] { storage.withLock { $0 } }
+  var values: [Value] { storage.withLock { $0.values } }
 
   func append(_ value: Value) {
-    storage.withLock { $0.append(value) }
+    let ready = storage.withLock { state in
+      state.values.append(value)
+      let count = state.values.count
+      defer { state.waiters.removeAll { $0.count <= count } }
+      return state.waiters.filter { $0.count <= count }.map(\.continuation)
+    }
+    for continuation in ready { continuation.resume() }
+  }
+
+  /// Waits until at least `count` values were recorded.
+  func waitForCount(_ count: Int) async {
+    await withCheckedContinuation { continuation in
+      let ready = storage.withLock { state in
+        if state.values.count < count { state.waiters.append((count, continuation)) }
+        return state.values.count >= count
+      }
+      if ready { continuation.resume() }
+    }
   }
 }
 
@@ -465,11 +541,13 @@ private struct SchedulerHarness {
   let scheduler: RecoveryScheduler
 
   /// `count` replaces the fake active count when given.
-  init(connector: FakeConnector, count: (@Sendable () -> Int)? = nil) {
+  init(
+    connector: FakeConnector,
+    sampler: ScriptedSampler = ScriptedSampler([.success([display(1, active: false)])]),
+    count: (@Sendable () -> Int)? = nil
+  ) {
     self.connector = connector
-    let recovery = ZeroActiveRecovery(
-      sampler: ScriptedSampler([.success([display(1, active: false)])]), connector: connector,
-      sleep: { _ in })
+    let recovery = ZeroActiveRecovery(sampler: sampler, connector: connector, sleep: { _ in })
     let settle = settle
     let outcomes = outcomes
     let activeCount = activeCount
