@@ -57,18 +57,36 @@ bounded() {
   limit "$secs" "$@"
 }
 
-# Number of displays `displayctl list` reports as active; -1 when list fails.
+# Number of displays `displayctl list` reports as active; -1 when list fails or times out.
 active_count() {
   local out
-  if ! out="$(bounded 10 "$DISPLAYCTL" list 2>/dev/null)"; then
+  if ! out="$(bounded "${1:-10}" "$DISPLAYCTL" list 2>/dev/null)"; then
     echo -1
     return
   fi
   printf '%s\n' "$out" | awk -F '\t' 'NR > 1 && $6 == "true" { n++ } END { print n + 0 }'
 }
 
+# Seconds until the next kickstart or connect all is due (0 or less: due now); 99 before dark.
+next_gap() {
+  local next
+  if [ -z "${dark_at:-}" ]; then echo 99; return; fi
+  next="$CONNECT_ALL_AFTER"
+  if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$KICKSTART_AFTER" -lt "$next" ]; then
+    next="$KICKSTART_AFTER"
+  fi
+  echo $(( next - ($(now) - dark_at) ))
+}
+
+# A list call must not run past the next due action: at most 10 s, at least 1 s.
+call_limit() {
+  local gap
+  gap="$(next_gap)"
+  if [ "$gap" -lt 1 ]; then echo 1; elif [ "$gap" -lt 10 ]; then echo "$gap"; else echo 10; fi
+}
+
 run_child() {
-  local log="$1" start last count elapsed dark_at="" t kicked=0
+  local log="$1" start last count elapsed dark_at="" t kicked=0 gap
   echo $$ > "$log.pid"
   start="$(now)"
   last="unset"
@@ -90,7 +108,7 @@ run_child() {
       return 1
     fi
     elapsed=$(( $(now) - start ))
-    count="$(active_count)"
+    count="$(active_count "$(call_limit)")"
     # Timers start at the zero reading, before the diagnostic list below can use its limit.
     if [ -z "$dark_at" ] && [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
       dark_at="$(now)"
@@ -106,10 +124,11 @@ run_child() {
       fi
       if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
         echo "$(stamp) dark+${t}s still no active display: running connect all"
-        bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
+        bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" \
+          || echo "$(stamp) connect all did not finish (deadline or time limit)"
       fi
     fi
-    listing="$(bounded 10 "$DISPLAYCTL" list 2>&1 || true)"
+    listing="$(bounded "$(call_limit)" "$DISPLAYCTL" list 2>&1 || true)"
     if [ "$listing" != "$last" ]; then
       echo "$(stamp) t=${elapsed}s active displays: $count"
       printf "%s\n" "$listing" | sed "s/^/$(stamp)   /"
@@ -138,8 +157,9 @@ run_child() {
       echo "$(stamp) a display is active again ${t}s after going dark. Done."
       return 0
     fi
-    # Sleeps min(1, time left), so the loop does not run past the deadline.
-    if [ "$(time_left)" -gt 0 ]; then sleep 1; fi
+    # No sleep when the deadline or a new action is less than 1 s away; repeats still sleep.
+    gap="$(next_gap)"
+    if [ "$(time_left)" -gt 1 ] && { [ "$gap" -gt 1 ] || [ "$gap" -le 0 ]; }; then sleep 1; fi
   done
 }
 
