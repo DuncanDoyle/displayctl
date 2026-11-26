@@ -184,6 +184,59 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(store.displays.map(\.isActive), [true, false])
   }
 
+  func testRecoverEnablesLedgerBuiltInWhenOnlyThePlaceholderIsActive() throws {
+    let builtIn = fixture(1, active: true)
+    let store = FakeDisplayStore([placeholder(12)])
+    let ledger = FakeLedger([entry(for: builtIn)])
+    store.reactions = [.init(id: 1, enabled: true): [builtIn, placeholder(12)]]
+
+    let outcomes = try XCTUnwrap(makeController(store, ledger: ledger).recoverIfNoneActive())
+
+    XCTAssertEqual(outcomes.map(\.display?.uuid), [builtIn.uuid])
+    XCTAssertTrue(try outcomes[0].result.get().isActive)
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: true)])
+    XCTAssertEqual(ledger.entries, [])
+  }
+
+  func testRecoverSkipsLedgerEntryWhoseSavedIDThePlaceholderHolds() throws {
+    let builtIn = fixture(1, active: true)
+    let store = FakeDisplayStore([placeholder(1)])
+    let ledger = FakeLedger([entry(for: builtIn)])
+
+    let outcomes = try XCTUnwrap(makeController(store, ledger: ledger).recoverIfNoneActive())
+
+    XCTAssertEqual(outcomes.map(\.display?.uuid), [builtIn.uuid])
+    guard case .failure(let error) = outcomes[0].result else { return XCTFail("expected skip") }
+    assertSkipped(error, contains: ["runtime ID 1", placeholder(1).uuid.uuidString])
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: builtIn)])
+  }
+
+  func testDisconnectRefusesWhenTheOnlyOtherActiveDisplayIsThePlaceholder() {
+    let store = FakeDisplayStore([fixture(1, active: true), placeholder(12)])
+
+    XCTAssertThrowsError(try makeController(store).disconnect("1")) {
+      XCTAssertEqual($0 as? DisplayControlError, .lastActiveDisplay)
+    }
+    XCTAssertEqual(store.requests, [])
+  }
+
+  func testDisconnectRollsBackWhenOnlyThePlaceholderRemains() {
+    let target = fixture(1, active: true)
+    let other = fixture(2, active: true, kind: .external)
+    let store = FakeDisplayStore([target, other])
+    // The Dell is unplugged during the disable and macOS adds its placeholder.
+    store.reactions = [
+      .init(id: 1, enabled: false): [placeholder(12)],
+      .init(id: 1, enabled: true): [target, placeholder(12)],
+    ]
+
+    XCTAssertThrowsError(try makeController(store).disconnect("1")) {
+      assertPostcondition($0, contains: ["no active display", "rollback enabled true completed"])
+    }
+    XCTAssertEqual(store.requests, [.init(id: 1, enabled: false), .init(id: 1, enabled: true)])
+  }
+
   func testDisplayConnectionOutcomePublicInitializerPreservesTypedFailure() {
     let display = fixture(1, active: false)
     let outcome = DisplayConnectionOutcome(
@@ -1043,6 +1096,14 @@ private func fixture(_ id: UInt32, active: Bool, kind: DisplayKind = .internal) 
     isMain: id == 1 && active,
     ddcCapability: .unknown
   )
+}
+
+/// The macOS placeholder (D-012): active, main and external, with UUID ...0099.
+private func placeholder(_ runtimeID: UInt32) -> Display {
+  Display(
+    uuid: fixture(99, active: true).uuid, runtimeID: runtimeID, name: "External Display",
+    kind: .external, isOnline: true, isActive: true, isMain: true, ddcCapability: .unknown,
+    isPlaceholder: true)
 }
 
 private func replacing(_ display: Display, active: Bool) -> Display {

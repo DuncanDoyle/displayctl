@@ -89,7 +89,7 @@ public struct ZeroActiveRecovery: Sendable {
       var verified = false
       while true {
         do {
-          verified = try await sampler.snapshot().contains { $0.isOnline && $0.isActive }
+          verified = try await sampler.snapshot().contains(where: \.isUsableActive)
           break
         } catch DisplayControlError.inventoryChanged {
           if sampleBudgetSpent() { return finish(.inconclusive) }
@@ -123,6 +123,7 @@ public struct ZeroActiveRecovery: Sendable {
 
 /// Debounces triggers (settle), runs one episode at a time, drops triggers that arrived during one.
 /// After .failed only .wake, or a .reconfiguration seeing activeCount() > 0, re-arms it.
+/// `activeCount` counts usable displays: the macOS placeholder must not count (D-012).
 public actor RecoveryScheduler {
   private let recovery: ZeroActiveRecovery
   private let activeCount: @Sendable () async -> Int

@@ -193,6 +193,28 @@ final class CLIParserTests: XCTestCase {
     let calls = await service.calls
     XCTAssertEqual(calls, ["forget:\(uuid.uuidString)", "forget:all"])
   }
+  func testListOmitsPlaceholderAndNotesItOnStderr() async {
+    let placeholder = Display(
+      uuid: UUID(uuidString: "DEE21DC4-D655-4C72-BB90-001415FBABA5")!, runtimeID: 12,
+      name: "External Display", kind: .external, isOnline: true, isActive: true, isMain: true,
+      ddcCapability: .unknown, isPlaceholder: true)
+    let app = CLIApplication(service: StubService(displays: [display(), placeholder]))
+    let plain = await app.execute(.list(json: false))
+    let json = await app.execute(.list(json: true))
+    let expected = await CLIApplication(service: StubService(displays: [display()]))
+      .execute(.list(json: true))
+
+    XCTAssertEqual(
+      plain.stdout,
+      "UUID\truntimeID\tname\tkind\tonline\tactive\tmain\tDDC\n"
+        + "\(uuid.uuidString)\t42\tDesk Display\texternal\ttrue\ttrue\tfalse\tcandidate\n")
+    XCTAssertEqual(json.stdout, expected.stdout)
+    XCTAssertFalse(json.stdout.contains("DEE21DC4"))
+    for result in [plain, json] {
+      XCTAssertEqual(result.stderr, "note: macOS placeholder display present (id 12)\n")
+      XCTAssertEqual(result.exitCode, 0)
+    }
+  }
   func testListNotesLedgerDisplaysThatAreNotOnline() async {
     let hidden = DisabledDisplayEntry(
       uuid: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!, runtimeID: 3,

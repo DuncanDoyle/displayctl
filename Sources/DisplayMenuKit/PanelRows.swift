@@ -17,12 +17,12 @@ public struct DisplayRow: Equatable, Identifiable, Sendable {
 public enum PanelRows {
   public static let onlyActiveCaption = "Only active display"
 
-  /// Ledger entries from another boot get no row (design §6.1).
+  /// Ledger entries from another boot and the macOS placeholder get no row (design §6.1).
   public static func make(
     displays: [Display], ledger: [DisabledDisplayEntry], currentBoot: String,
     busy: UUID?, errors: [UUID: String]
   ) -> [DisplayRow] {
-    let online = displays.filter(\.isOnline)
+    let online = displays.filter { $0.isOnline && !$0.isPlaceholder }
     let onlineIDs = Set(online.map(\.uuid))
     let activeCount = online.filter(\.isActive).count
 

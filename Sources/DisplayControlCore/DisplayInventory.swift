@@ -15,6 +15,7 @@ struct DisplayMetadata: Sendable {
   let vendorNumber: UInt32
   let modelNumber: UInt32
   let localizedName: String?
+  var isPlaceholder = false
 }
 
 public struct DisplayInventory: DisplaySnapshotProviding {
@@ -98,7 +99,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isMain: CGDisplayIsMain(displayID) != 0,
         vendorNumber: CGDisplayVendorNumber(displayID),
         modelNumber: CGDisplayModelNumber(displayID),
-        localizedName: localizedNames[displayID]
+        localizedName: localizedNames[displayID],
+        isPlaceholder: Self.isPlaceholder(displayID)
       )
     }
 
@@ -108,6 +110,40 @@ public struct DisplayInventory: DisplaySnapshotProviding {
       metadata: metadata
     )
     return Self.applyingDDCCapabilities(to: displays, detector: candidateDetector)
+  }
+
+  /// The macOS placeholder signature seen on macOS 27.0.1 (D-012): vendor 'unkn', model 'virt',
+  /// 0×0 mm and no current mode. A heuristic: all four must hold.
+  static func isPlaceholder(
+    vendorNumber: UInt32, modelNumber: UInt32, sizeMillimeters: CGSize, hasCurrentMode: Bool
+  ) -> Bool {
+    vendorNumber == placeholderVendor && modelNumber == placeholderModel
+      && sizeMillimeters == .zero && !hasCurrentMode
+  }
+
+  private static let placeholderVendor: UInt32 = 0x756E_6B6E  // 'unkn'
+  private static let placeholderModel: UInt32 = 0x7669_7274  // 'virt'
+
+  /// Reads the placeholder signals from Core Graphics; size and mode only when the IDs match.
+  static func isPlaceholder(_ displayID: CGDirectDisplayID) -> Bool {
+    guard CGDisplayVendorNumber(displayID) == placeholderVendor,
+      CGDisplayModelNumber(displayID) == placeholderModel
+    else { return false }
+    return isPlaceholder(
+      vendorNumber: placeholderVendor, modelNumber: placeholderModel,
+      sizeMillimeters: CGDisplayScreenSize(displayID),
+      hasCurrentMode: CGDisplayCopyDisplayMode(displayID) != nil)
+  }
+
+  /// Active displays minus placeholders; cheap enough for the safety net's re-arm check.
+  static func usableActiveCount(activeIDs: [UInt32], isPlaceholder: (UInt32) -> Bool) -> Int {
+    activeIDs.filter { !isPlaceholder($0) }.count
+  }
+
+  /// The live usable active count, without a full inventory; an error counts as zero.
+  public static func usableActiveDisplayCount() -> Int {
+    guard let activeIDs = try? activeDisplayIDs() else { return 0 }
+    return usableActiveCount(activeIDs: activeIDs, isPlaceholder: isPlaceholder(_:))
   }
 
   /// The UUID Core Graphics maps `runtimeID` to right now, or nil when it maps none.
@@ -148,7 +184,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isOnline: true,
         isActive: isActive,
         isMain: isActive && displayMetadata.isMain,
-        ddcCapability: .unknown
+        ddcCapability: .unknown,
+        isPlaceholder: displayMetadata.isPlaceholder
       )
     }
 
@@ -174,7 +211,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isOnline: display.isOnline,
         isActive: display.isActive,
         isMain: display.isMain,
-        ddcCapability: detector.capability(for: display)
+        ddcCapability: detector.capability(for: display),
+        isPlaceholder: display.isPlaceholder
       )
     }
   }

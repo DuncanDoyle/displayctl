@@ -24,6 +24,16 @@ public struct Display: Codable, Equatable, Sendable {
   public let isActive: Bool
   public let isMain: Bool
   public let ddcCapability: DDCCapability
+  /// The stand-in macOS adds when no real display is left (D-012); it is never usable.
+  /// Not encoded: `list --json` omits placeholders, so the field would always read false.
+  public private(set) var isPlaceholder = false
+
+  /// Online and active, and not the macOS placeholder.
+  public var isUsableActive: Bool { isOnline && isActive && !isPlaceholder }
+
+  private enum CodingKeys: String, CodingKey {
+    case uuid, runtimeID, name, kind, isOnline, isActive, isMain, ddcCapability
+  }
 
   public init(
     uuid: UUID,
@@ -33,7 +43,8 @@ public struct Display: Codable, Equatable, Sendable {
     isOnline: Bool,
     isActive: Bool,
     isMain: Bool,
-    ddcCapability: DDCCapability
+    ddcCapability: DDCCapability,
+    isPlaceholder: Bool = false
   ) {
     self.uuid = uuid
     self.runtimeID = runtimeID
@@ -43,5 +54,6 @@ public struct Display: Codable, Equatable, Sendable {
     self.isActive = isActive
     self.isMain = isMain
     self.ddcCapability = ddcCapability
+    self.isPlaceholder = isPlaceholder
   }
 }

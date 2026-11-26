@@ -1,4 +1,3 @@
-import CoreGraphics
 import DisplayControlCore
 import DisplayMenuKit
 import Foundation
@@ -27,7 +26,7 @@ struct LiveServices: Sendable {
       sleep: { try? await Task.sleep(for: $0) },
       log: { logger.notice("\($0, privacy: .public)") })
     scheduler = RecoveryScheduler(
-      recovery: recovery, activeCount: { activeDisplayCount() },
+      recovery: recovery, activeCount: { DisplayInventory.usableActiveDisplayCount() },
       sleep: { try await Task.sleep(for: $0) },
       onOutcome: { logger.notice("episode outcome: \(String(describing: $0), privacy: .public)") })
   }
@@ -100,11 +99,4 @@ struct LiveSampler: DisplaySampling {
   func snapshot() async throws -> [Display] {
     try await executor.run { [inventory] in try inventory.snapshot() }
   }
-}
-
-/// A cheap count for re-arming the safety net; an error counts as zero.
-func activeDisplayCount() -> Int {
-  var count: UInt32 = 0
-  guard CGGetActiveDisplayList(0, nil, &count) == .success else { return 0 }
-  return Int(count)
 }

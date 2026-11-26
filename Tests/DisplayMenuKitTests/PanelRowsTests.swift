@@ -55,6 +55,19 @@ final class PanelRowsTests: XCTestCase {
     XCTAssertTrue(both.allSatisfy { $0.isSwitchEnabled && $0.caption == nil })
   }
 
+  func testPlaceholderHasNoRowAndNeverCountsAsActive() {
+    let placeholder = Display(
+      uuid: lgID, runtimeID: 12, name: "External Display", kind: .external, isOnline: true,
+      isActive: true, isMain: true, ddcCapability: .unknown, isPlaceholder: true)
+
+    let rows = make([builtIn(active: false), dell(), placeholder])
+
+    XCTAssertEqual(rows.map(\.id), [builtInID, dellID])
+    XCTAssertFalse(rows[1].isSwitchEnabled)
+    XCTAssertEqual(rows[1].caption, "Only active display")
+    XCTAssertEqual(make([placeholder]), [])
+  }
+
   func testAllSwitchesDisabledWhileBusy() {
     let rows = make(
       [builtIn(), dell()], ledger: [entry(lgID, "LG UltraFine")], busy: dellID,

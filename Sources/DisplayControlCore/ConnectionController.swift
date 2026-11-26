@@ -251,13 +251,13 @@ public struct ConnectionController: Sendable {
     }
   }
 
-  /// Under the operation lock: nil if any display is online and active; otherwise connectAll's
-  /// outcomes, with candidates from the same snapshot. Stops with nil if a display turns active
-  /// before the first enable succeeds.
+  /// Under the operation lock: nil if a usable display is active (the macOS placeholder does not
+  /// count); otherwise connectAll's outcomes, with candidates from the same snapshot. Stops with
+  /// nil if a usable display turns active before the first enable succeeds.
   public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]? {
     try operationLock.withLock {
       let displays = try snapshot.snapshot()
-      guard !displays.contains(where: { $0.isOnline && $0.isActive }) else { return nil }
+      guard !displays.contains(where: \.isUsableActive) else { return nil }
       do {
         return try connectAllLocked(from: displays, stopIfActive: true)
       } catch is DisplayBecameActive {
@@ -317,7 +317,7 @@ public struct ConnectionController: Sendable {
       guard display.isActive else {
         throw DisplayControlError.invalidState("Display \(display.runtimeID) is already inactive")
       }
-      guard displays.filter(\.isActive).count > 1 else {
+      guard displays.filter(\.isUsableActive).count > 1 else {
         throw DisplayControlError.lastActiveDisplay
       }
       let entry = DisabledDisplayEntry(
@@ -336,7 +336,7 @@ public struct ConnectionController: Sendable {
     stopIfActive: Bool = false
   ) throws -> Display {
     let displays = try snapshot.snapshot()
-    if stopIfActive, displays.contains(where: { $0.isOnline && $0.isActive }) {
+    if stopIfActive, displays.contains(where: \.isUsableActive) {
       throw DisplayBecameActive()
     }
     let matches = displays.filter { $0.uuid == uuid }
@@ -415,7 +415,7 @@ public struct ConnectionController: Sendable {
     }
 
     // The last-active check ran before the disable; another display may have gone away since.
-    if !enabled, !refreshed.contains(where: { $0.isOnline && $0.isActive }) {
+    if !enabled, !refreshed.contains(where: \.isUsableActive) {
       throw postconditionFailure(
         "Display \(display.uuid.uuidString) was disabled but no active display remains",
         display: display,

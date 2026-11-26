@@ -164,9 +164,13 @@ struct CLIApplication: Sendable {
         return CLIResult(stdout: Self.help + "\n")
       case .list(let json):
         let displays = try await service.list()
+        // The macOS placeholder (D-012) is not a usable display: noted on stderr only.
+        let placeholderNote = displays.filter(\.isPlaceholder).map {
+          "note: macOS placeholder display present (id \($0.runtimeID))\n"
+        }.joined()
         return CLIResult(
-          stdout: try renderList(displays, json: json),
-          stderr: await ledgerOnlyNote(displays))
+          stdout: try renderList(displays.filter { !$0.isPlaceholder }, json: json),
+          stderr: placeholderNote + (await ledgerOnlyNote(displays)))
       case .connect(let selector):
         return CLIResult(stdout: mutation("connected", try await service.connect(selector)))
       case .disconnect(let selector):

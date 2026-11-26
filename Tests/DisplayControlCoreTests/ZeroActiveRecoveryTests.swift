@@ -123,6 +123,18 @@ final class ZeroActiveRecoveryTests: XCTestCase {
     XCTAssertEqual(connector.calls, 3)
   }
 
+  func testPlaceholderAloneInVerificationIsNotRecovered() async {
+    let connector = FakeConnector([.success([stuck(1)])])
+    let sampler = ScriptedSampler([.success([display(1, active: false), placeholder()])])
+    let sleeper = ManualSleeper()
+
+    let outcome = await drive(
+      recovery(sampler: sampler, connector: connector, sleeper: sleeper), sleeper)
+
+    XCTAssertEqual(outcome, .failed(attempts: 3))
+    XCTAssertEqual(connector.calls, 3)
+  }
+
   func testInconclusiveAfterFiveInconsistentSamples() async {
     let connector = FakeConnector([.failure(.inventoryChanged)])
     let sleeper = ManualSleeper()
@@ -217,6 +229,30 @@ final class RecoverySchedulerTests: XCTestCase {
     await harness.fire(.reconfiguration)
     XCTAssertEqual(harness.connector.calls, 6)
     XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+  }
+
+  func testPlaceholderOnlyReconfigurationKeepsFailedNetDisarmedUntilReplug() async {
+    // Live-style count over active IDs; ID 12 is the macOS placeholder.
+    let activeIDs = Mutex<[UInt32]>([])
+    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])])) {
+      DisplayInventory.usableActiveCount(
+        activeIDs: activeIDs.withLock { $0 }, isPlaceholder: { $0 == 12 })
+    }
+    await harness.fire(.launch)
+
+    // A counted placeholder would re-arm here and run an episode on the second callback.
+    activeIDs.withLock { $0 = [12] }
+    await harness.fire(.reconfiguration)
+    await harness.fire(.reconfiguration)
+    XCTAssertEqual(harness.connector.calls, 3)
+
+    // Dell plugged back in re-arms; the next undock runs an episode.
+    activeIDs.withLock { $0 = [5] }
+    await harness.fire(.reconfiguration)
+    XCTAssertEqual(harness.connector.calls, 3)
+    activeIDs.withLock { $0 = [12] }
+    await harness.fire(.reconfiguration)
+    XCTAssertEqual(harness.connector.calls, 6)
   }
 
   func testDisplayActiveInsideOneSettleWindowRearmsAfterFailure() async {
@@ -428,7 +464,8 @@ private struct SchedulerHarness {
   let activeCount = FakeActiveCount()
   let scheduler: RecoveryScheduler
 
-  init(connector: FakeConnector) {
+  /// `count` replaces the fake active count when given.
+  init(connector: FakeConnector, count: (@Sendable () -> Int)? = nil) {
     self.connector = connector
     let recovery = ZeroActiveRecovery(
       sampler: ScriptedSampler([.success([display(1, active: false)])]), connector: connector,
@@ -437,7 +474,7 @@ private struct SchedulerHarness {
     let outcomes = outcomes
     let activeCount = activeCount
     scheduler = RecoveryScheduler(
-      recovery: recovery, activeCount: { activeCount.count() },
+      recovery: recovery, activeCount: { count?() ?? activeCount.count() },
       sleep: { await settle.sleep($0) }, onOutcome: { outcomes.append($0) })
   }
 
@@ -486,6 +523,13 @@ private func display(_ id: UInt32, active: Bool) -> Display {
     uuid: UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", id))!,
     runtimeID: id, name: "Display \(id)", kind: .external, isOnline: true, isActive: active,
     isMain: false, ddcCapability: .unknown)
+}
+
+private func placeholder() -> Display {
+  Display(
+    uuid: UUID(uuidString: "DEE21DC4-D655-4C72-BB90-001415FBABA5")!, runtimeID: 12,
+    name: "External Display", kind: .external, isOnline: true, isActive: true, isMain: true,
+    ddcCapability: .unknown, isPlaceholder: true)
 }
 
 private func enabled(_ id: UInt32) -> DisplayConnectionOutcome {
