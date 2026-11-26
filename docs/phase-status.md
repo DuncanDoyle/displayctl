@@ -16,7 +16,7 @@ Status: implementing on branch duncandoyle/menuBar (executing-plans, Claude impl
 - [x] Q4 Task 3 DisplayMenuKit executor, rows, switching — 2f8a9d7; 204 tests pass. Choices beyond the plan: a failed snapshot keeps the old rows; errors are pruned with their rows; `BootSession.current()` public; `Fakes.swift` test helper.
 - [x] Q5 Task 4 brightness model — c0200ab; 215 tests pass. Choices beyond the plan: reads are awaited inside refresh/setDisplay; a successful write clears the error; a failed write is retried when the release value matches; last known value kept per UUID for the app run; `setBrightness` cancels an in-flight read.
 - [x] Q6 (P3 correctness) `DDCCapability.confirmed` removed (never produced; Phase 2 does not need it) — src: phases/phase-1/reviews/design-claude.md#8
-- [ ] Q7 Task 5 displayctl-menu app
+- [x] Q7 Task 5 displayctl-menu app — bcf5385 (built, not yet run; first run with the owner). 217 tests pass. The CLI also takes the main-thread hop for `NSScreen` names (works: `list` checked). Each reconfiguration callback refreshes once (not coalesced).
 - [ ] Q8 Task 6 install, uninstall, README
 - [ ] Q9 Task 7 hardware validation
 - [ ] Q10 Codex phase review; must check the P2 fixes from reviews/design2-codex.md that were not re-reviewed
