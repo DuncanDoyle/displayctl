@@ -11,7 +11,7 @@ let thisBoot = "boot-current"
 
 func display(
   _ uuid: UUID, _ name: String, kind: DisplayKind = .external, active: Bool = true,
-  online: Bool = true, ddc: DDCCapability = .confirmed
+  online: Bool = true, ddc: DDCCapability = .candidate
 ) -> Display {
   Display(
     uuid: uuid, runtimeID: UInt32(uuid.uuidString.suffix(2), radix: 16) ?? 0, name: name,

@@ -11,7 +11,6 @@ public enum DisplayKind: String, Codable, Sendable {
 
 public enum DDCCapability: String, Codable, Sendable {
   case candidate
-  case confirmed
   case unsupported
   case unknown
 }

@@ -14,8 +14,8 @@ Status: implementing on branch duncandoyle/menuBar (executing-plans, Claude impl
 - [x] Q2 (P4 architecture) Measure snapshot and brightness-set cost — src: phases/phase-1/reviews/design-claude.md#10, phase-claude.md#4 — 2026-11-26, Dell on USB-C, whole CLI process incl. launch: `list` 40–60 ms, `brightness get` 130–140 ms, `brightness set` (same value) 170–190 ms. One write in flight gives about 5–6 slider updates per second; acceptable, no caching needed now.
 - [x] Q3 Task 2 safety net in DisplayControlCore — 44aa166; 184 tests pass. Choices beyond the plan: internal `drain()` for tests; a wake in a coalesced window wins; a disarmed net re-arms without running when `activeCount() > 0`.
 - [x] Q4 Task 3 DisplayMenuKit executor, rows, switching — 2f8a9d7; 204 tests pass. Choices beyond the plan: a failed snapshot keeps the old rows; errors are pruned with their rows; `BootSession.current()` public; `Fakes.swift` test helper.
-- [ ] Q5 Task 4 brightness model
-- [ ] Q6 (P3 correctness) set `DDCCapability.confirmed` after a successful read, or remove it — src: phases/phase-1/reviews/design-claude.md#8
+- [x] Q5 Task 4 brightness model — c0200ab; 215 tests pass. Choices beyond the plan: reads are awaited inside refresh/setDisplay; a successful write clears the error; a failed write is retried when the release value matches; last known value kept per UUID for the app run; `setBrightness` cancels an in-flight read.
+- [x] Q6 (P3 correctness) `DDCCapability.confirmed` removed (never produced; Phase 2 does not need it) — src: phases/phase-1/reviews/design-claude.md#8
 - [ ] Q7 Task 5 displayctl-menu app
 - [ ] Q8 Task 6 install, uninstall, README
 - [ ] Q9 Task 7 hardware validation

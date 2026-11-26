@@ -12,7 +12,7 @@ final class CLIParserTests: XCTestCase {
   ) -> Display {
     Display(
       uuid: uuid ?? self.uuid, runtimeID: id, name: name, kind: .external,
-      isOnline: true, isActive: active, isMain: false, ddcCapability: .confirmed)
+      isOnline: true, isActive: active, isMain: false, ddcCapability: .candidate)
   }
   func testParsesDocumentedCommandsAndRejectsInvalidArguments() throws {
     let valid: [([String], CLICommand)] = [
@@ -68,12 +68,12 @@ final class CLIParserTests: XCTestCase {
     XCTAssertEqual(
       human.stdout,
       "UUID\truntimeID\tname\tkind\tonline\tactive\tmain\tDDC\n"
-        + "\(uuid.uuidString)\t42\tDesk\\\\\\t\\n\\r\\u{01}\texternal\ttrue\ttrue\tfalse\tconfirmed\n"
+        + "\(uuid.uuidString)\t42\tDesk\\\\\\t\\n\\r\\u{01}\texternal\ttrue\ttrue\tfalse\tcandidate\n"
     )
     let json = await app.execute(.list(json: true))
     XCTAssertEqual(
       json.stdout,
-      "[{\"ddcCapability\":\"confirmed\",\"isActive\":true,\"isMain\":false,\"isOnline\":true,"
+      "[{\"ddcCapability\":\"candidate\",\"isActive\":true,\"isMain\":false,\"isOnline\":true,"
         + "\"kind\":\"external\",\"name\":\"Desk\\\\\\t\\n\\r\\u0001\",\"runtimeID\":42,"
         + "\"uuid\":\"\(uuid.uuidString)\"}]\n")
     let empty = CLIApplication(service: StubService())
