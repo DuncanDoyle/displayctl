@@ -18,6 +18,6 @@ Task 7 step 5 now explicitly covers macOS lighting the panel on lid open. Its ti
 ## Triage
 | # | Finding | Dimension | Source | Decision | Note |
 |---|---|---|---|---|---|
-| 1 | A due action can lose its last second to a count | correctness | reviewer | reject: the count must get its full time (see #2), so a `list` slower than the gap between an action and the deadline can always crowd it out. The real `list` takes 40–60 ms (Q2) and the hardware settings leave 60 s between the first `connect all` (30 s) and the deadline (90 s). | Owner to confirm. |
+| 1 | A due action can lose its last second to a count | correctness | reviewer | reject: the count must get its full time (see #2), so a `list` slower than the gap between an action and the deadline can always crowd it out. The real `list` takes 40–60 ms (Q2) and the hardware settings leave 60 s between the first `connect all` (30 s) and the deadline (90 s). | Owner agreed ("Agree", 2026-11-26); review loop stopped here. |
 | 2 | Capped counts can miss a display that came back | correctness | reviewer | accept | Regression from 568d5a2. The count again gets its full 10 s (bounded only by the deadline); only the diagnostic listing is capped at the next due action. Fake run with a 2 s `list`: the display came back mid-run and the fallback ended with "a display is active again". |
 | 3 | A CLI error is logged as a timeout | correctness | reviewer | accept | Logs the cause by exit status: 124 not started (deadline), 142 stopped by its time limit, otherwise "exited N". Fake run: "connect all exited 1". |
