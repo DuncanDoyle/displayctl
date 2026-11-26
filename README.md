@@ -45,6 +45,33 @@ If a screen does not come back:
 
 Brightness works over HDMI and USB-C on a Dell U2720Q (macOS 27.0.1). Other monitors need DDC/CI enabled in their own menu.
 
+## Menu bar app
+
+`displayctl-menu` puts a display icon in the menu bar. It starts at login as a LaunchAgent.
+
+```sh
+Scripts/install-menu.sh     # build, install, start
+Scripts/uninstall-menu.sh   # stop and remove the LaunchAgent
+```
+
+`install-menu.sh` builds release, copies `displayctl-menu` and `displayctl` to `~/.local/bin/`, writes `~/Library/LaunchAgents/com.github.duncandoyle.displayctl-menu.plist` and starts it. It installs the CLI too, so both run the same build. Run it again after pulling changes. `uninstall-menu.sh` stops the app and removes the plist. It keeps both binaries and the ledger.
+
+The panel lists each display with an on/off switch. The switch of the last active display is disabled. External monitors with DDC/CI get a brightness slider. A failure shows one line under its row. The app and the CLI share the ledger and the lock, so a CLI change shows up in the panel.
+
+Quit stops the app until the next login. To start it sooner:
+
+```sh
+launchctl kickstart gui/$(id -u)/com.github.duncandoyle.displayctl-menu
+```
+
+If it crashes, launchd restarts it. Logs:
+
+```sh
+log show --predicate 'subsystem == "displayctl"' --last 1h
+```
+
+Safety net: when no display is active, at launch, after a display change or after wake, the app runs `connect all` up to 3 times. It never turns a display off, and it does nothing while any display is active.
+
 ## Build and test
 
 ```sh
@@ -128,6 +155,14 @@ If testing is interrupted or a display stays dark, recover in this order:
 1. Run `.build/debug/displayctl connect all`, from another terminal if needed. It tries every online inactive display and every ledger entry, and reports each result. It exits nonzero if anything failed, including an unreadable ledger, but it still tries the online displays. Repeat it if another `displayctl` holds the lock.
 2. Check the result with `.build/debug/displayctl list`.
 3. If a display is still missing, reboot; that brings it back (D-010). Logout/login does not help (D-008).
+
+If `connect all` or the menu bar app reports the ledger as unreadable, look at the file:
+
+```sh
+cat ~/Library/Application\ Support/displayctl/disabled-displays.json
+```
+
+Each entry names a display that `displayctl` turned off. Neither the CLI nor the app rewrites an unreadable file. `displayctl forget all` resets it to empty. Run it only once every display that was turned off is back on: it deletes the record that `connect` needs to find them.
 
 A remote shell helps only if it can list the GUI session's displays. A headless shell may see none.
 
