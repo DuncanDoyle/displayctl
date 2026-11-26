@@ -171,11 +171,10 @@ Matching works only through the numeric EDID serial number, checked together wit
 The distinction between capability states is explicit:
 
 - Candidate: a plausible external AV service exists.
-- Confirmed: a valid DDC operation has succeeded.
 - Unsupported: no safe service match or DDC transport is available.
 - Unknown: probing failed without establishing support.
 
-`displayctl list` must not claim confirmed DDC support solely because a candidate service exists.
+`displayctl list` reports at most "candidate": a service match is not proof that DDC works. There is no "confirmed" state; `brightness get` is the check (removed in Phase 2, phase-1/reviews/design-claude.md#8).
 
 ### 6.5 DDC brightness controller
 

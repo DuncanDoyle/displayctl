@@ -17,6 +17,11 @@ public struct DisplayConnectionOutcome: Sendable {
   }
 }
 
+/// Recovery saw an active display before its first enable; it ends without acting.
+private struct DisplayBecameActive: Error {
+  let displays: [Display]
+}
+
 protocol DisplayOperationLocking: Sendable {
   func withLock<T>(_ operation: () throws -> T) throws -> T
 }
@@ -200,8 +205,9 @@ public struct ConnectionController: Sendable {
   private func connect(_ kind: DisplayKind, selector: String, in displays: [Display]) throws
     -> Display
   {
-    let online = displays.filter { $0.kind == kind }
-    let onlineUUIDs = Set(online.map(\.uuid))
+    // The placeholder is no candidate, but its UUID still counts as online for the ledger.
+    let onlineUUIDs = Set(displays.filter { $0.kind == kind }.map(\.uuid))
+    let online = displays.filter { $0.kind == kind && !$0.isPlaceholder }
     let inactive = online.filter { !$0.isActive }
     let entries: [DisabledDisplayEntry]
     do {
@@ -244,35 +250,71 @@ public struct ConnectionController: Sendable {
   /// unreadable ledger is reported as a last failed outcome; online displays are still attempted.
   public func connectAll() throws -> [DisplayConnectionOutcome] {
     try operationLock.withLock {
-      var ledgerFailure: DisplayControlError?
-      var entries: [DisabledDisplayEntry] = []
-      do {
-        entries = try ledger.load()
-      } catch {
-        ledgerFailure = error as? DisplayControlError ?? .configurationFailed("\(error)")
-      }
-      var candidates = try snapshot.snapshot()
-        .filter { $0.isOnline && !$0.isActive }
-        .map { display in (display, entries.first { $0.uuid == display.uuid }) }
-      let candidateUUIDs = Set(candidates.map(\.0.uuid))
-      candidates += entries.filter { !candidateUUIDs.contains($0.uuid) }.map {
-        ($0.placeholder, $0)
-      }
-
-      let outcomes = candidates.map { display, entry in
-        let result: Result<Display, DisplayControlError>
-        do {
-          result = .success(try reconnect(display.uuid, entry: entry, acceptAlreadyActive: true))
-        } catch let error as DisplayControlError {
-          result = .failure(error)
-        } catch {
-          result = .failure(.configurationFailed(String(describing: error)))
-        }
-        return DisplayConnectionOutcome(display: display, result: result)
-      }
-      guard let ledgerFailure else { return outcomes }
-      return outcomes + [DisplayConnectionOutcome(display: nil, result: .failure(ledgerFailure))]
+      try connectAllLocked(from: try snapshot.snapshot(), stopIfActive: false)
     }
+  }
+
+  /// Under the operation lock: nil if a usable display is active (the macOS placeholder does not
+  /// count); otherwise connectAll's outcomes, with candidates from the same snapshot. Stops with
+  /// nil if a usable display turns active before the first enable succeeds. Before returning nil
+  /// it drops the ledger entries of displays that snapshot shows usable-active.
+  public func recoverIfNoneActive() throws -> [DisplayConnectionOutcome]? {
+    try operationLock.withLock {
+      let displays = try snapshot.snapshot()
+      guard !displays.contains(where: \.isUsableActive) else {
+        removeEntries(activeIn: displays)
+        return nil
+      }
+      do {
+        return try connectAllLocked(from: displays, stopIfActive: true)
+      } catch let active as DisplayBecameActive {
+        removeEntries(activeIn: active.displays)
+        return nil
+      }
+    }
+  }
+
+  /// The body of `connectAll` over `displays`; the caller holds the operation lock.
+  private func connectAllLocked(from displays: [Display], stopIfActive: Bool) throws
+    -> [DisplayConnectionOutcome]
+  {
+    var ledgerFailure: DisplayControlError?
+    var entries: [DisabledDisplayEntry] = []
+    do {
+      entries = try ledger.load()
+    } catch {
+      ledgerFailure = error as? DisplayControlError ?? .configurationFailed("\(error)")
+    }
+    var candidates =
+      displays
+      .filter { $0.isOnline && !$0.isActive }
+      .map { display in (display, entries.first { $0.uuid == display.uuid }) }
+    let candidateUUIDs = Set(candidates.map(\.0.uuid))
+    candidates += entries.filter { !candidateUUIDs.contains($0.uuid) }.map {
+      ($0.placeholder, $0)
+    }
+
+    var outcomes: [DisplayConnectionOutcome] = []
+    var enabledAny = false
+    for (display, entry) in candidates {
+      let result: Result<Display, DisplayControlError>
+      do {
+        result = .success(
+          try reconnect(
+            display.uuid, entry: entry, acceptAlreadyActive: true,
+            stopIfActive: stopIfActive && !enabledAny))
+        enabledAny = true
+      } catch let error as DisplayControlError {
+        result = .failure(error)
+      } catch let error as DisplayBecameActive {
+        throw error
+      } catch {
+        result = .failure(.configurationFailed(String(describing: error)))
+      }
+      outcomes.append(DisplayConnectionOutcome(display: display, result: result))
+    }
+    guard let ledgerFailure else { return outcomes }
+    return outcomes + [DisplayConnectionOutcome(display: nil, result: .failure(ledgerFailure))]
   }
 
   /// Records the display in the ledger, then disables it; a ledger failure leaves it untouched.
@@ -283,7 +325,7 @@ public struct ConnectionController: Sendable {
       guard display.isActive else {
         throw DisplayControlError.invalidState("Display \(display.runtimeID) is already inactive")
       }
-      guard displays.filter(\.isActive).count > 1 else {
+      guard displays.filter(\.isUsableActive).count > 1 else {
         throw DisplayControlError.lastActiveDisplay
       }
       let entry = DisabledDisplayEntry(
@@ -298,16 +340,21 @@ public struct ConnectionController: Sendable {
   private func reconnect(
     _ uuid: UUID,
     entry: DisabledDisplayEntry?,
-    acceptAlreadyActive: Bool
+    acceptAlreadyActive: Bool,
+    stopIfActive: Bool = false
   ) throws -> Display {
     let displays = try snapshot.snapshot()
+    if stopIfActive, displays.contains(where: \.isUsableActive) {
+      throw DisplayBecameActive(displays: displays)
+    }
     let matches = displays.filter { $0.uuid == uuid }
     guard matches.count <= 1 else {
       throw DisplayControlError.ambiguousSelector(uuid.uuidString)
     }
 
     let result: Display
-    if let online = matches.first {
+    // The placeholder is never a reconnect target; its entry takes the offline path below.
+    if let online = matches.first, !online.isPlaceholder {
       if online.isActive {
         guard acceptAlreadyActive else {
           throw DisplayControlError.invalidState("Display \(online.runtimeID) is already active")
@@ -317,6 +364,12 @@ public struct ConnectionController: Sendable {
         result = try transition(online, enabled: true)
       }
     } else if let entry {
+      // Whatever ID it holds now, the placeholder's entry must not reach the hardware.
+      if let online = matches.first {
+        throw DisplayControlError.recoverySkipped(
+          "Display \(uuid.uuidString) is the macOS placeholder at runtime ID \(online.runtimeID); "
+            + "its recorded runtime ID \(entry.runtimeID) is not used")
+      }
       guard entry.bootSession == (try bootSession()) else {
         throw DisplayControlError.recoverySkipped(
           "Display \(uuid.uuidString) was disabled in an earlier boot; its recorded runtime ID "
@@ -362,6 +415,16 @@ public struct ConnectionController: Sendable {
     try? ledger.save(entries.filter { $0.uuid != uuid })
   }
 
+  /// Drops the entries of displays usable-active in `displays`, e.g. one macOS lit on lid open.
+  private func removeEntries(activeIn displays: [Display]) {
+    let active = Set(displays.filter(\.isUsableActive).map(\.uuid))
+    guard let entries = try? ledger.load(), entries.contains(where: { active.contains($0.uuid) })
+    else {
+      return
+    }
+    try? ledger.save(entries.filter { !active.contains($0.uuid) })
+  }
+
   private func transition(_ display: Display, enabled: Bool) throws -> Display {
     try hardware.setEnabled(display.runtimeID, enabled: enabled)
     let refreshed: [Display]
@@ -377,7 +440,7 @@ public struct ConnectionController: Sendable {
     }
 
     // The last-active check ran before the disable; another display may have gone away since.
-    if !enabled, !refreshed.contains(where: { $0.isOnline && $0.isActive }) {
+    if !enabled, !refreshed.contains(where: \.isUsableActive) {
       throw postconditionFailure(
         "Display \(display.uuid.uuidString) was disabled but no active display remains",
         display: display,

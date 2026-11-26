@@ -3,7 +3,7 @@
 ## 1. Status
 
 - Phase: 2 — Menu bar app (D-009)
-- Status: Draft, awaiting user approval and Codex review
+- Status: Approved by the owner 2026-11-26 (after Codex reviews design-codex.md, design2-codex.md)
 - Platform: Apple Silicon Mac, macOS 27.0.1 (D-002)
 - Language: Swift, SwiftUI and AppKit; no new third-party dependencies
 - Builds on: `DisplayControlCore` from Phase 1, unchanged except for the additions in §5
@@ -70,7 +70,7 @@ displayctl (CLI)        displayctl-menu (launchd agent)
 Execution boundaries:
 - Blocking controller and inventory calls run on one serial `DispatchQueue` owned by the app, never on the main thread and never on Swift's cooperative pool. Callers `await` them through a continuation. The recovery code depends only on `async` protocols, so the app supplies queue-backed adapters and the CLI keeps its synchronous API.
 - DDC calls stay on the existing `DDCBrightnessController` actor. A write blocks one cooperative thread for at most its bounded retries (a few hundred ms). The slider has at most one write in flight, so at most one thread is ever blocked. Accepted trade-off: it keeps Phase 1's DDC code unchanged.
-- `DisplayInventory` reads display names from `NSScreen`. When called off the main thread it fetches them with `DispatchQueue.main.sync`. The main thread never waits synchronously on the work queue, so this cannot deadlock.
+- `DisplayInventory(namesOnMainThread: true)`, used only by the app, reads display names from `NSScreen` on the main thread with `DispatchQueue.main.sync`. The main thread never waits synchronously on the work queue, so this cannot deadlock. The CLI keeps reading them on its own thread: with the hop, macOS waited about 10 s after each CLI display change for the CLI to handle the change notification (observed 2026-11-26).
 
 ## 6. Components
 
@@ -92,7 +92,7 @@ Clicking it opens:
 ```
 
 Rows:
-- One row per online display, plus one per ledger entry from the current boot that macOS no longer lists (D-005). Ledger-only rows show as off. Entries from an earlier boot get no row. An orphan left when a display was re-cabled while off (its UUID changes per connection path) cannot be told apart from a real ledger-only display in the same boot, so it shows as an off row; turning it on fails with the controller's error, and `displayctl forget` removes it.
+- One row per online display except the macOS placeholder (D-012), plus one per ledger entry from the current boot that macOS no longer lists (D-005). Ledger-only rows show as off. Entries from an earlier boot get no row. An orphan left when a display was re-cabled while off (its UUID changes per connection path) cannot be told apart from a real ledger-only display in the same boot, so it shows as an off row; turning it on fails with the controller's error, and `displayctl forget` removes it.
 - Switch on = display active. Turning it off calls `disconnect <uuid>`; turning it on calls `connect <uuid>`.
 - The switch of the last active display is disabled, with a short caption ("Only active display"). The controller still enforces the rule; the UI only avoids offering it.
 - While an operation runs, every switch is disabled and the row shows a spinner. Operations run off the main thread, one at a time.
@@ -108,34 +108,28 @@ Rows:
 - Shown under each active external display whose DDC capability is not `unsupported`.
 - The app reads the current value (`DDCBrightnessController.get`) when the panel opens and whenever a row gains a slider while the panel is open (display turned on, monitor plugged in). Until a read succeeds the label shows "—" and the slider sits at the last value this app run saw, or the middle. Showing the slider never writes. A reply with maximum 0 counts as a failed read.
 - While dragging, at most one DDC write is in flight. When it finishes, the app sends the newest value if it changed. The value where the owner let go is always written last. Slider values reach the coalescer in the order they were produced: the coalescer lives on the main actor and is called synchronously from the slider.
-- Each write looks up the display by UUID in a fresh snapshot just before sending, and is dropped if that UUID is no longer online and active. When a display leaves or turns off, its pending value is discarded and late results for it are ignored. A queued value therefore never reaches a different monitor that reused the runtime ID.
+- Each write looks up the display by UUID in a fresh snapshot just before sending, and is dropped if that UUID is no longer online and active. When a display leaves or turns off, its pending value is discarded and late results for it are ignored. A queued value therefore never reaches a different monitor that reused the runtime ID. The guarantee covers queued values, not a write already handed to the DDC actor: a runtime ID reused while that write waits for or runs on the actor can reach the replacement monitor. Accepted on the same grounds as the owner-confirmed Phase 1 case (reviews/design2-codex.md #5): it needs an unplug and a different monitor in that window, and the result is only a brightness change (reviews/code-codex.md #5, owner-confirmed).
 - Write failures show one line under the slider; the next drag tries again.
 - Range 0–100 %, step 1.
 
 ### 6.3 Safety net (`ZeroActiveRecovery`)
 
-Triggers:
-1. App start (covers a launchd restart after a crash).
-2. End of a display reconfiguration (`CGDisplayRegisterReconfigurationCallback`, callbacks without the begin flag).
-3. System wake (`NSWorkspace.shared.notificationCenter`, `didWakeNotification`).
+Two paths lead to the same guarded check (D-014):
+- **Events, the fast path.** App start, system wake (`NSWorkspace.shared.notificationCenter`, `didWakeNotification`) and display reconfiguration (`CGDisplayRegisterReconfigurationCallback`, begin-flag callbacks ignored). Events are hints: the first one schedules a check after a settle period (default 2 s); later events merge into that pending check without moving its deadline. While a recovery episode runs, ordinary events are dropped; the periodic check covers anything they would have seen.
+- **Periodic check, the backstop.** Every 10 s, but only while the ledger has an entry from the current boot (something `displayctl` turned off could need recovery). Each tick reads the usable active count only: the active list plus vendor, model and serial per ID; no inventory, no I/O Registry, no lock. A positive count means nothing to do; a query error means unknown (no action); a confirmed zero starts an episode if none runs and no cooldown is active. One timer with tolerance, no sleep-prevention assertion, no replay of missed ticks, no logging of healthy ticks. The app watches the ledger's directory, so a CLI `disconnect` or `connect` starts or stops the timer; it also reloads the ledger at launch and wake.
 
-On a trigger:
-1. Wait for a settle period (default 2 s) after the last trigger, so transient states during plug or unplug do not count.
-2. Call `recoverIfNoneActive()`. It checks and acts under the operation lock (§5). `nil` means a display is active: done.
-3. Otherwise check the result. Recovery succeeded if a fresh snapshot shows at least one active display. Every failed outcome is logged with its display and reason, including a refused earlier-boot entry and an unreadable ledger (returned as an outcome with no display).
-4. If still no display is active, retry (default 3 attempts in total, 2 s apart). A thrown error, such as a lock timeout while a CLI command runs, counts as a failed attempt.
-5. An inconsistent sample (`inventoryChanged`, thrown once the inventory's 3 samples in total all failed), whether from the locked check or the verification, is not an attempt: it is sampled again after the retry delay, up to 5 times per episode. If those run out, the episode ends as inconclusive.
-6. Log every decision with `os.Logger` (subsystem `displayctl`, category `recovery`), including the trigger that started the episode.
+An episode:
+1. Calls `recoverIfNoneActive()`. It checks and acts under the operation lock (§5); `nil` means a usable display is active: done. When a usable display is active it also drops ledger entries of displays that are already on.
+2. Otherwise checks the result. Recovery succeeded if a fresh snapshot shows a usable active display. Every failed outcome is logged with its display and reason, including a refused earlier-boot entry and an unreadable ledger (an outcome with no display).
+3. Retries if still none is usable (default 3 attempts in total, 2 s apart). A thrown error, such as a lock timeout while a CLI command runs, counts as an attempt.
+4. An inconsistent sample (`inventoryChanged`) is not an attempt: it is sampled again after the retry delay, up to 5 times per episode.
+5. Logs every decision with `os.Logger` (subsystem `displayctl`, category `recovery`), including what started the episode (event or periodic check).
 
-Episodes: the attempts above form one episode, and only one runs at a time. Triggers that arrive during an episode, including callbacks caused by its own enable calls, are dropped; the episode re-checks on its own. After an episode:
-- **Recovered, display active, or inconclusive:** the next trigger starts a new episode as usual.
-- **Failed (still no display active after 3 attempts):** the safety net stays quiet. A wake re-arms it. So does a reconfiguration callback after which the active-display count (a cheap `CGGetActiveDisplayList` count, not a full inventory) is above zero, for example the Dell plugged back in.
+After an episode that ends without a usable display (3 failed attempts, or the inconsistent-sample budget used up), a cooldown of 60 s starts. During it neither events nor ticks start an episode; a wake ends the cooldown and gives a fresh budget for that wake. This bounds recovery's own callbacks without any rule about which event caused which.
 
-This keeps the retry budget bounded without missing the next real undock.
+Observer registration: if `CGDisplayRegisterReconfigurationCallback` fails, the app logs it and the panel shows "Safety net off: display changes are not being watched." The periodic check stays on. The callback context lives for the whole process; the C callback only hands the event to the main actor and returns.
 
-Observer registration is part of the safety net. If `CGDisplayRegisterReconfigurationCallback` returns an error, the app logs it and the panel shows "Safety net off: display changes are not being watched." The callback context lives for the whole process; the C callback only hands the event to the main actor and returns.
-
-It never disconnects anything and never acts while a display is active. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged; see §9.
+"Usable active" means online, active and not the macOS placeholder display that appears when no real display is left (vendor `unkn`, model `virt`, serial 0; D-012, D-013). The safety net never disconnects anything and never starts while a usable display is active; once an episode has started at zero, it may enable every recoverable display, as `connect all` does. Entries from an earlier boot are refused by the ledger rule (§6.3.1 of the Phase 1 design) and logged.
 
 ### 6.4 Process lifecycle and install
 
@@ -162,9 +156,9 @@ Automated (at the `DisplayMenuKit` and `ZeroActiveRecovery` boundaries, with fak
 - Brightness coalescer: one write in flight; final value always written; no write without user input; a failed write does not block the next drag.
 - An older refresh cannot overwrite the result of a newer operation.
 - Brightness: a row that gains a slider while open is read; a display leaving discards its pending write; maximum 0 is a read error.
-- Safety net: no-op while any display is active, checked under the lock (a CLI connect that wins the lock leaves other displays off); returned failures and thrown errors both logged and counted; bounded retries; episodes end and re-arm only on wake or an active display; startup trigger runs the same path.
+- Safety net: no-op while any usable display is active, checked under the lock (a CLI connect that wins the lock leaves other displays off); returned failures and thrown errors both logged and counted; bounded retries; events merge into one settled check and are dropped during an episode; a tick finds the dark state with no further callback; cooldown after an episode without a usable display, ended by wake; the periodic check runs only while the ledger has a current-boot entry (D-014).
 
-Hardware (owner present, Dell attached). Every step that can leave no active display first arms an independent fallback outside the app. It has the Phase 1 watchdog's guarantees: it is detached, confirms it is running, and from 30 s on retries `displayctl connect all` until a display is active or a 90 s hard deadline passes. Before the first zero-active step, the fallback alone is shown to restore a built-in display that was turned off with the CLI (app stopped, Dell attached). The app must restore a display within 10 s of the event (unplug, launch or wake); the record notes whether the app or the fallback restored it, and which trigger the app logged. Replugging the Dell is the last resort. These steps deliberately leave no other display attached; the fallback makes that acceptable, and a reboot restores the display if all else fails (D-010).
+Hardware (owner present, Dell attached). Every step that can leave no active display first arms an independent fallback outside the app. It has the Phase 1 watchdog's guarantees: it is detached, confirms it is running, and from 30 s on retries `displayctl connect all` until a display is active or a 90 s hard deadline passes. Before the first zero-active step, the fallback alone is shown to restore a built-in display that was turned off with the CLI (app stopped, Dell attached). With events on, the app must restore a display within 10 s of the event (unplug, launch or wake); in step 9b (events off) within 15 s of the screen going dark (10 s check plus recovery); in step 11, within 10 s of opening the lid by either route described there; the record notes whether the app or the fallback restored it, and which trigger the app logged. Replugging the Dell is the last resort. These steps deliberately leave no other display attached; the fallback makes that acceptable, and a reboot restores the display if all else fails (D-010).
 
 Each step starts with both displays on and the app running unless it says otherwise.
 1. Install; icon appears; panel lists both displays with correct state. Close and reopen the panel: it refreshes each time.
@@ -175,9 +169,10 @@ Each step starts with both displays on and the app running unless it says otherw
 6. A CLI `disconnect internal` shows up in the open panel.
 7. `kill -9` the app: launchd restarts it and the icon returns.
 8. Quit: the app stays stopped until `kickstart` or the next login.
-9. Safety net, panel closed: built-in off from the panel, close the panel, unplug the Dell. The built-in display comes back without input; the log shows a `reconfiguration` trigger. Over HDMI; USB-C if available.
-10. Startup recovery: Quit the app; turn the built-in off with the CLI; unplug the Dell. Once the screen is dark, start the fallback with a `launchctl kickstart` 5 s after it starts. The built-in display comes back; the log shows a `launch` trigger and no earlier `reconfiguration` episode.
-11. Wake recovery: built-in off, Dell attached; close the lid; unplug the Dell (the Mac sleeps); wait 10 s; open the lid. The built-in display comes back within 10 s of opening; the log shows which trigger started the episode, and the step passes only if it is `wake` or a `reconfiguration` stamped after the wake.
+9. Safety net, panel closed: built-in off from the panel, close the panel, unplug the Dell. The built-in display comes back without input; the log shows a `reconfiguration` trigger. Over HDMI and over USB-C.
+9b. Periodic check alone (D-014): start the app with `DISPLAYCTL_MENU_NO_EVENTS=1` (no display-change, wake or launch triggers; the wake observer only reopens the ledger watch), built-in off, unplug the Dell. The built-in display comes back within about 15 s of the screen going dark (10 s check plus recovery); the log shows a `tick` start.
+10. Startup recovery: Quit the app; turn the built-in off with the CLI; start the fallback with `--kickstart-after 5` (timers count from the moment no usable display is active); unplug the Dell. The built-in display comes back; the log shows a `launch` trigger and no earlier `reconfiguration` episode.
+11. Wake recovery: built-in off, Dell attached; close the lid; unplug the Dell (the Mac sleeps); wait 10 s; open the lid. The built-in display is usable within 10 s of opening the lid; the log shows which route got there. Observed route on macOS 27.0.1: with the lid closed the reconfiguration episode enables the built-in but it cannot light, so the episode ends `failed`; macOS lights it on lid open and the wake check finds it active. Either route passes if the built-in is usable within 10 s of opening the lid.
 12. Login: log out and in; the icon appears without manual start.
 
 ## 9. Risks and open questions
@@ -198,6 +193,6 @@ Each step starts with both displays on and the app running unless it says otherw
 
 Phase 2 is complete when:
 - The package builds and all automated tests pass on the target Mac.
-- Hardware steps 1–12 in §8 pass, recorded in README with dates.
+- Hardware steps 1–12 in §8 pass, recorded in README with dates (step 9 over HDMI and USB-C).
 - The README documents install, uninstall, Quit and restart, and recovery.
 - Design and plan match the code; `decisions.md` holds any deviation.

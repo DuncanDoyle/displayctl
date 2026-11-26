@@ -1,5 +1,7 @@
 public enum DisplaySelector {
-  public static func resolve(_ selector: String, in displays: [Display]) throws -> Display {
+  /// The macOS placeholder (D-012) is never a target.
+  public static func resolve(_ selector: String, in allDisplays: [Display]) throws -> Display {
+    let displays = allDisplays.filter { !$0.isPlaceholder }
     if selector == DisplayKind.internal.rawValue {
       return try resolveMatches(selector, displays.filter { $0.kind == .internal })
     }

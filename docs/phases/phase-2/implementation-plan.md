@@ -30,7 +30,7 @@
 2. **A display disappears while the panel is open, mid-operation or mid-drag** → its row, error and pending brightness are dropped; no write reaches another monitor. Tests in Tasks 3 and 4.
 3. **Ledger unreadable** → panel lists online displays with the ledger note, file untouched; recovery logs the outcome and still tries online displays. Tests in Tasks 2 and 3.
 4. **Safety net while a CLI command holds the lock, or a CLI `connect` wins the lock first** → lock timeout counts as a failed attempt; after the CLI connect, recovery enables nothing. Tests in Task 2.
-5. **Recovery's own enable triggers a reconfiguration callback and then fails** → the episode still ends after 3 attempts; no new episode until wake or an active display. Test in Task 2.
+5. **Recovery's own enable triggers a reconfiguration callback and then fails** → the episode still ends after 3 attempts, then a 60 s cooldown that only a wake ends (D-014). Test in Task 2.
 
 ---
 
@@ -53,6 +53,8 @@ Throwaway. Answers design §9's open question before the real target exists.
 ---
 
 ### Task 2: Safety net in `DisplayControlCore`
+
+> Superseded in part by D-014: the scheduler interface and its tests below describe the first, event-only design. The code now merges events into one settled check, adds a 10 s periodic check while the ledger has a current-boot entry, and a 60 s cooldown; see design §6.3.
 
 **Files:**
 - Modify: `Sources/DisplayControlCore/ConnectionController.swift` (add `recoverIfNoneActive()`; `connectAll()` and it share one private body)
@@ -130,7 +132,7 @@ An inconsistent-sample error is `DisplayControlError.inventoryChanged`, from eit
   - `testFailedEpisodeRearmsWhenActiveCountAboveZero` → `.reconfiguration` with `activeCount == 1` → re-armed; a later zero-active `.reconfiguration` runs.
   - `testInconclusiveDoesNotDisarm` → after `.inconclusive`, the next `.reconfiguration` runs.
 - [ ] **Step 4:** `swift test --scratch-path .agents-tmp/build --filter "ZeroActiveRecoveryTests|RecoverySchedulerTests|ConnectionControllerTests"` → the new tests FAIL.
-- [ ] **Step 5:** Implement. Active means `isOnline && isActive`. A thrown connector error is logged and counts as an attempt.
+- [ ] **Step 5:** Implement. Active means usable active: `isOnline && isActive && !isPlaceholder` (D-012). A thrown connector error is logged and counts as an attempt.
 - [ ] **Step 6:** Filter → PASS; full `swift test --parallel --scratch-path .agents-tmp/build` → PASS; lint → exit 0.
 - [ ] **Step 7:** Commit: `feat(core): zero-active-display recovery under the operation lock`.
 
@@ -277,7 +279,7 @@ extension PanelModel {
 - Test: `Tests/DisplayMenuKitTests/LiveBrightnessConversionTests.swift` (percent conversion lives in `DisplayMenuKit` as `BrightnessPercent.from(_ value: DDCValue) throws -> Int`)
 
 - [ ] **Step 1: Write failing `LiveBrightnessConversionTests`:** `testRoundsToPercent` (`DDCValue(current: 50, maximum: 200)` → 25), `testZeroMaximumThrows` → `.ddcInvalidResponse("maximum is 0")`. Run → FAIL; implement `BrightnessPercent.from`; run → PASS.
-- [ ] **Step 2:** `LiveAdapters`: one `BlockingExecutor`; `LiveDisplayOperations` wraps one `ConnectionController(snapshot: DisplayInventory(), hardware: CoreGraphicsDisplayConnectionHardware())` with `uuid.uuidString` selectors; `LiveBrightness` resolves the UUID in a fresh snapshot through the executor, drops if not online and active, then awaits `DDCBrightnessController` (its actor, design §5). `LiveRecoveryConnector: RecoveryConnecting` and `LiveSampler: DisplaySampling` wrap the controller and inventory through the executor; `activeCount` calls `CGGetActiveDisplayList` directly.
+- [ ] **Step 2:** `LiveAdapters`: one `BlockingExecutor`; `LiveDisplayOperations` wraps one `ConnectionController(snapshot: DisplayInventory(), hardware: CoreGraphicsDisplayConnectionHardware())` with `uuid.uuidString` selectors; `LiveBrightness` resolves the UUID in a fresh snapshot through the executor, drops if not online and active, then awaits `DDCBrightnessController` (its actor, design §5). `LiveRecoveryConnector: RecoveryConnecting` and `LiveSampler: DisplaySampling` wrap the controller and inventory through the executor; `activeCount` calls `CGGetActiveDisplayList` directly. As built: the inventory is `DisplayInventory(namesOnMainThread: true)` (app only, see design §5), the scheduler's count is `DisplayInventory.usableActiveDisplayCount()` (placeholder excluded, D-012),; since D-014 the callback only hands the event to the main actor (no stamps or counts), a 10 s timer calls `tick()` while the ledger has a confirmed current-boot entry, and a directory watch on the ledger keeps that up to date.
 - [ ] **Step 3:** `SystemObservers`: registers `CGDisplayRegisterReconfigurationCallback` with a context object retained for the process lifetime; the callback ignores begin-flag events and hands the rest to `Task { @MainActor in … }` → `scheduler.trigger(.reconfiguration)` and `model.refresh()`. A non-success `CGError` → log and set `model.safetyNetNote`. `NSWorkspace.shared.notificationCenter` `didWakeNotification` → `trigger(.wake)` + `refresh()`. On launch → `trigger(.launch)`.
 - [ ] **Step 4:** `PanelView` per design §6.1–6.2: header "Displays"; rows (name, `Toggle(.switch)`, `ProgressView` when busy, caption and error as secondary text); `Slider(0...100, step: 1)` with "—"/percent for `showsBrightness` rows; `panelNote` and `safetyNetNote` lines; divider; "Quit" → `exit(0)`. `.onAppear { await model.panelOpened() }`, `.onDisappear { model.panelClosed() }`; the slider calls `model.setBrightness` synchronously. Icon `display`.
 - [ ] **Step 5:** `swift build -c release --scratch-path .agents-tmp/build` → exit 0; full suite → PASS; lint → exit 0.
@@ -308,8 +310,8 @@ extension PanelModel {
 
 - [ ] **Step 1:** Write `menu-fallback.sh`, reusing the detach and retry approach of `Scripts/hardware-test.sh`'s watchdog: args `--kickstart-after <s>` (optional), `--connect-all-after 30`, `--deadline 90`; prints a ready line once detached; timestamps each action; exits once a display is active or at the deadline. `bash -n` → exit 0.
 - [ ] **Step 2:** Prove the fallback: app stopped, Dell attached, `displayctl disconnect internal`, start the fallback → it restores the built-in display from the ledger, logged. Only then run zero-active steps.
-- [ ] **Step 3:** With the user, run design §8 hardware steps 1–12 in order, with each step's stated preconditions. Before steps 9–11, start `menu-fallback.sh` (step 10: once the screen is dark, with `--kickstart-after 5`).
+- [ ] **Step 3:** With the user, run design §8 hardware steps 1–12 and 9b in order, with each step's stated preconditions. Before steps 9–11, start `menu-fallback.sh` (step 10: with `--kickstart-after 5`; its timers count from the moment no usable display is active).
 - [ ] **Step 4:** Step 7: `launchctl kill SIGKILL gui/$(id -u)/com.github.duncandoyle.displayctl-menu`; `launchctl print` shows a new PID within 15 s.
-- [ ] **Step 5:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record whether the app (≤ 10 s) or the fallback restored the display.
+- [ ] **Step 5:** Steps 9–11: save `log show --predicate 'subsystem == "displayctl" AND category == "recovery"' --last 10m` and the fallback log into `.agents-tmp/`; record what restored the display (the app, the fallback, or in step 11 macOS on lid open), against the per-step times in design §8 (9: 10 s after the unplug, 9b: 15 s after dark, 10: 10 s after launch, 11: 10 s after lid open by either route).
 - [ ] **Step 6:** Record each step as observed (date, macOS version) or failed with evidence. An unrun step is not a pass.
 - [ ] **Step 7:** Commit: `docs: Phase 2 hardware results`.

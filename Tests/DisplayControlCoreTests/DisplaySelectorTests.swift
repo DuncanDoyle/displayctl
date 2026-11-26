@@ -154,6 +154,23 @@ final class DisplaySelectorTests: XCTestCase {
     }
   }
 
+  func testPlaceholderIsNeverATarget() throws {
+    let builtIn = fixture(id: 1, kind: .internal)
+    let external = fixture(id: 2, kind: .external)
+    let placeholder = Display(
+      uuid: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!, runtimeID: 12,
+      name: "External Display", kind: .external, isOnline: true, isActive: true, isMain: true,
+      ddcCapability: .unknown, isPlaceholder: true)
+
+    for selector in ["external", placeholder.uuid.uuidString, "12"] {
+      XCTAssertThrowsError(try DisplaySelector.resolve(selector, in: [builtIn, placeholder])) {
+        XCTAssertEqual($0 as? DisplayControlError, .displayNotFound(selector))
+      }
+    }
+    XCTAssertEqual(
+      try DisplaySelector.resolve("external", in: [builtIn, placeholder, external]), external)
+  }
+
   private func fixture(
     id: UInt32,
     kind: DisplayKind,

@@ -1,0 +1,196 @@
+#!/bin/bash
+# Independent fallback for the Phase 2 hardware tests (design §8). Runs detached, logs every
+# change in the active-display count and, once no display is active, can start the menu app
+# and later retries `displayctl connect all` until a display is active or a deadline passes.
+# Written for macOS /bin/bash 3.2.
+set -euo pipefail
+
+KICKSTART_AFTER=""
+CONNECT_ALL_AFTER=30
+DEADLINE=90
+DISPLAYCTL="$HOME/.local/bin/displayctl"
+LABEL="com.github.duncandoyle.displayctl-menu"
+LOG_DIR="$HOME/Library/Logs/displayctl-menu-fallback"
+# Proof mode: run connect all once even while a display is active, to show the detached
+# process can restore a display in the GUI session.
+EVEN_IF_ACTIVE=0
+# Without a dark period within this many seconds the fallback exits.
+WAIT_FOR_DARK=600
+
+usage() {
+  echo "usage: $0 [--even-if-active] [--kickstart-after S] [--connect-all-after S] [--deadline S] [--displayctl PATH]" >&2
+  exit 64
+}
+
+CHILD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kickstart-after) KICKSTART_AFTER="${2:?}"; shift 2 ;;
+    --connect-all-after) CONNECT_ALL_AFTER="${2:?}"; shift 2 ;;
+    --deadline) DEADLINE="${2:?}"; shift 2 ;;
+    --displayctl) DISPLAYCTL="${2:?}"; shift 2 ;;
+    --child) CHILD="${2:?}"; shift 2 ;;
+    --even-if-active) EVEN_IF_ACTIVE=1; shift ;;
+    *) usage ;;
+  esac
+done
+
+now() { date +%s; }
+# Runs a command with a time limit, so a hung command cannot hold up the deadline.
+limit() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
+stamp() { date '+%H:%M:%S'; }
+
+# Seconds left to the hard deadline once no display is active; empty before that.
+time_left() {
+  if [ -n "${dark_at:-}" ]; then echo $(( dark_at + DEADLINE - $(now) )); fi
+}
+
+# Like limit, capped by the time left; does not start the command once the deadline has passed.
+bounded() {
+  local secs="$1" left
+  shift
+  left="$(time_left)"
+  if [ -n "$left" ]; then
+    if [ "$left" -le 0 ]; then return 124; fi
+    if [ "$left" -lt "$secs" ]; then secs="$left"; fi
+  fi
+  limit "$secs" "$@"
+}
+
+# Number of displays `displayctl list` reports as active; -1 when list fails.
+active_count() {
+  local out
+  if ! out="$(bounded 10 "$DISPLAYCTL" list 2>/dev/null)"; then
+    echo -1
+    return
+  fi
+  printf '%s\n' "$out" | awk -F '\t' 'NR > 1 && $6 == "true" { n++ } END { print n + 0 }'
+}
+
+# Seconds until the next kickstart or connect all is due (0 or less: due now); 99 before dark.
+next_gap() {
+  local next
+  if [ -z "${dark_at:-}" ]; then echo 99; return; fi
+  next="$CONNECT_ALL_AFTER"
+  if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$KICKSTART_AFTER" -lt "$next" ]; then
+    next="$KICKSTART_AFTER"
+  fi
+  echo $(( next - ($(now) - dark_at) ))
+}
+
+# The diagnostic list must not run past the next due action: at most 10 s, at least 1 s.
+call_limit() {
+  local gap
+  gap="$(next_gap)"
+  if [ "$gap" -lt 1 ]; then echo 1; elif [ "$gap" -lt 10 ]; then echo "$gap"; else echo 10; fi
+}
+
+run_child() {
+  local log="$1" start last count elapsed dark_at="" t kicked=0 gap rc
+  echo $$ > "$log.pid"
+  start="$(now)"
+  last="unset"
+  echo "$(stamp) fallback started (kickstart-after=${KICKSTART_AFTER:-none}, connect-all-after=$CONNECT_ALL_AFTER, deadline=$DEADLINE; times count from when no display is active)"
+  # Ready only once displayctl answers, so a broken setup fails before the test starts.
+  count="$(active_count)"
+  if [ "$count" = "-1" ]; then
+    echo "$(stamp) displayctl list failed; fallback not ready."
+    return 1
+  fi
+  if [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
+    dark_at="$(now)"
+    echo "$(stamp) no active display at start: timers start now"
+  fi
+  : > "$log.ready"
+  while :; do
+    if [ -n "$dark_at" ] && [ "$(time_left)" -le 0 ]; then
+      echo "$(stamp) dark+$(( $(now) - dark_at ))s deadline reached; giving up. Replug the external display or reboot."
+      return 1
+    fi
+    elapsed=$(( $(now) - start ))
+    count="$(active_count)"
+    # Timers start at the zero reading, before the diagnostic list below can use its limit.
+    if [ -z "$dark_at" ] && [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
+      dark_at="$(now)"
+      echo "$(stamp) no active display: timers start now"
+    fi
+    # Actions run before the diagnostic list below, which can take up to 10 s.
+    if [ -n "$dark_at" ] && [ "$count" -le 0 ]; then
+      t=$(( $(now) - dark_at ))
+      if [ -n "$KICKSTART_AFTER" ] && [ "$kicked" -eq 0 ] && [ "$t" -ge "$KICKSTART_AFTER" ]; then
+        kicked=1
+        echo "$(stamp) dark+${t}s kickstart $LABEL"
+        bounded 10 launchctl kickstart "gui/$(id -u)/$LABEL" || echo "$(stamp) kickstart failed"
+      fi
+      if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
+        echo "$(stamp) dark+${t}s still no active display: running connect all"
+        rc=0
+        bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || rc=$?
+        # 124: not started, deadline passed; 142: stopped by its time limit (SIGALRM).
+        case "$rc" in
+          0) ;;
+          124) echo "$(stamp) connect all not started: deadline passed" ;;
+          142) echo "$(stamp) connect all stopped by its time limit" ;;
+          *) echo "$(stamp) connect all exited $rc" ;;
+        esac
+      fi
+    fi
+    listing="$(bounded "$(call_limit)" "$DISPLAYCTL" list 2>&1 || true)"
+    if [ "$listing" != "$last" ]; then
+      echo "$(stamp) t=${elapsed}s active displays: $count"
+      printf "%s\n" "$listing" | sed "s/^/$(stamp)   /"
+      last="$listing"
+    fi
+    if [ "$EVEN_IF_ACTIVE" -eq 1 ]; then
+      if [ "$elapsed" -ge "$CONNECT_ALL_AFTER" ]; then
+        echo "$(stamp) proof mode: running connect all"
+        limit 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
+        echo "$(stamp) active displays after: $(active_count). Done."
+        return 0
+      fi
+      sleep 1
+      continue
+    fi
+    if [ -z "$dark_at" ]; then
+      if [ "$elapsed" -ge "$WAIT_FOR_DARK" ]; then
+        echo "$(stamp) no display went dark within ${WAIT_FOR_DARK}s; fallback exits."
+        return 0
+      fi
+      sleep 1
+      continue
+    fi
+    t=$(( $(now) - dark_at ))
+    if [ "$count" -gt 0 ]; then
+      echo "$(stamp) a display is active again ${t}s after going dark. Done."
+      return 0
+    fi
+    # No sleep when the deadline or a new action is less than 1 s away; repeats still sleep.
+    gap="$(next_gap)"
+    if [ "$(time_left)" -gt 1 ] && { [ "$gap" -gt 1 ] || [ "$gap" -le 0 ]; }; then sleep 1; fi
+  done
+}
+
+
+if [ -n "$CHILD" ]; then
+  run_child "$CHILD"
+  exit $?
+fi
+
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/run.$(date +%Y%m%d-%H%M%S).log"
+# Own process group and nohup: survives a closed terminal and Ctrl-C, like the Phase 1 watchdog.
+( set -m; nohup /bin/bash "$0" --child "$LOG" --connect-all-after "$CONNECT_ALL_AFTER" \
+    --deadline "$DEADLINE" --displayctl "$DISPLAYCTL" \
+    $( [ "$EVEN_IF_ACTIVE" -eq 1 ] && echo --even-if-active ) \
+    ${KICKSTART_AFTER:+--kickstart-after "$KICKSTART_AFTER"} \
+    >> "$LOG" 2>&1 < /dev/null & )
+# The readiness probe may take its full 10 s list limit, so wait 12 s before reporting failure.
+for _ in $(seq 1 120); do
+  [ -e "$LOG.ready" ] && break
+  sleep 0.1
+done
+if [ ! -e "$LOG.ready" ]; then
+  echo "Fallback did not start; do not continue the test. Log: $LOG" >&2
+  exit 1
+fi
+echo "Fallback armed (pid $(cat "$LOG.pid")). Log: $LOG"

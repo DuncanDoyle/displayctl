@@ -45,6 +45,35 @@ If a screen does not come back:
 
 Brightness works over HDMI and USB-C on a Dell U2720Q (macOS 27.0.1). Other monitors need DDC/CI enabled in their own menu.
 
+## Menu bar app
+
+`displayctl-menu` puts a display icon in the menu bar. It starts at login as a LaunchAgent.
+
+```sh
+Scripts/install-menu.sh     # build, install, start
+Scripts/uninstall-menu.sh   # stop and remove the LaunchAgent
+```
+
+`install-menu.sh` builds release, copies `displayctl-menu` and `displayctl` to `~/.local/bin/`, writes `~/Library/LaunchAgents/com.github.duncandoyle.displayctl-menu.plist` and starts it. It installs the CLI too, so both run the same build. Run it again after pulling changes. `uninstall-menu.sh` stops the app and removes the plist. It keeps both binaries and the ledger.
+
+The panel lists each display with an on/off switch. The switch of the last active display is disabled. External monitors with DDC/CI get a brightness slider. A failure shows one line under its row. The app and the CLI share the ledger and the lock, so a CLI change shows up in the panel.
+
+Quit stops the app until the next login. To start it sooner:
+
+```sh
+launchctl kickstart gui/$(id -u)/com.github.duncandoyle.displayctl-menu
+```
+
+If it crashes, launchd restarts it. Logs:
+
+```sh
+log show --predicate 'subsystem == "displayctl"' --last 1h
+```
+
+Safety net: when no usable display is active (the macOS placeholder does not count), at launch, after a display change, after wake, and every 10 s while a display it turned off is in the saved list, the app turns displays that `displayctl` turned off back on, up to 3 attempts. The check and the reconnect happen under the same lock as the CLI. It never turns a display off and never starts while a usable display is active; once it starts at zero it may turn on every display it can, like `connect all`. After an attempt run that ends without a usable display (3 failed attempts, or a display list that kept changing) it waits 60 s; a wake ends the wait. When it finds a usable display active, it also clears saved entries for displays that are already on.
+
+After an undock, macOS may show a placeholder display with no name. `displayctl` ignores it, and `list` notes it on standard error.
+
 ## Build and test
 
 ```sh
@@ -129,7 +158,23 @@ If testing is interrupted or a display stays dark, recover in this order:
 2. Check the result with `.build/debug/displayctl list`.
 3. If a display is still missing, reboot; that brings it back (D-010). Logout/login does not help (D-008).
 
+If `connect all` or the menu bar app reports the ledger as unreadable, look at the file:
+
+```sh
+cat ~/Library/Application\ Support/displayctl/disabled-displays.json
+```
+
+Each entry names a display that `displayctl` turned off. Neither the CLI nor the app rewrites an unreadable file. `displayctl forget all` resets it to empty. Run it only once every display that was turned off is back on: it deletes the record that `connect` needs to find them.
+
 A remote shell helps only if it can list the GUI session's displays. A headless shell may see none.
+
+After a macOS update, check that the placeholder rule still holds (D-013):
+
+```sh
+DISPLAYCTL_DEBUG=1 displayctl list
+```
+
+It prints one `debug:` line per display on standard error, with the raw vendor, model and serial numbers and whether `displayctl` counts it as the placeholder. The placeholder has vendor 1970170734 (`unkn`), model 1986622068 (`virt`) and serial 0. If a real display matches, or the placeholder no longer does, the rule needs an update.
 
 ## Hardware validation
 
@@ -183,6 +228,22 @@ Target: macOS 27.0.1 (D-002). Record observed evidence for each item. An unrun c
 - [x] A reboot restores a disabled display: the built-in display came back after a reboot; a later `connect all` removed the leftover ledger entry, exit 0 (D-010) — observed 2026-11-26 (macOS 27.0.1).
 
 After the scripted steps, reconnect the monitor over USB-C, run `list`, then `brightness get` and a carefully confirmed `brightness set`. Record supported or unsupported; there is no fallback. Then disconnect the internal display, log out and back in, and run `connect all` once by hand.
+
+### Results on macOS 27 — menu bar app (Phase 2)
+
+The steps are in `docs/phases/phase-2/design.md` §8. All were observed on 2026-11-26 on macOS 27.0.1, with the Dell U2720Q over USB-C unless a step says HDMI. Before each step that could leave no display on, a detached fallback outside the app was armed.
+
+- [x] 1–5: install, panel, switches, the disabled last-active switch and the brightness slider work.
+- [x] 6: a CLI `disconnect internal` shows up in the open panel. The first run found each CLI change took 10 s; the cause was a main-thread call for display names. Observed again with the fix.
+- [x] 7–8: launchd restarts the app after `kill -9`; after Quit it stays stopped.
+- [x] Placeholder finding: step 9 first failed three times. About 6 s after the unplug, macOS adds a placeholder display, so no moment with zero active displays came (D-012). Its size and mode differ per process, so `displayctl` now detects it by vendor, model and serial only (D-013).
+- [x] Fallback only, app stopped, placeholder as main display: the fallback brought the built-in back 6 s after it went dark.
+- [x] 9: safety net after an unplug, over USB-C. The app brought the built-in back about 2.5 s after the unplug, started by a `reconfiguration` trigger.
+- [x] 10: startup recovery. `kickstart` ran 5 s after the screen went dark; the app recovered by its `launch` trigger, and the built-in was back 9 s after dark.
+- [x] 11: wake recovery, passed by another route. The app's enable attempts with the lid closed failed, because the panel cannot light with the lid shut, but they left it enabled. macOS lit it when the lid opened, and the wake check found it active.
+- [x] 9 over HDMI: the app brought the built-in back about 3 s after the screen went dark, started by a `reconfiguration` trigger, on its first attempt; the fallback did nothing. The same session read the Dell over HDMI: `brightness get external` returned 20/100, exit 0.
+- [x] 9b: periodic check alone (D-014), with display, wake and launch triggers off (`DISPLAYCTL_MENU_NO_EVENTS=1`). The log shows an episode started by `tick`; the built-in was back within 1 s of going dark, because a check happened to run right then.
+- [x] 12: after logout and login, the icon appeared without a manual start.
 
 ### History: macOS 26.5, 2026-06-30
 

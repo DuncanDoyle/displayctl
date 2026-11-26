@@ -15,6 +15,7 @@ struct DisplayMetadata: Sendable {
   let vendorNumber: UInt32
   let modelNumber: UInt32
   let localizedName: String?
+  var isPlaceholder = false
 }
 
 public struct DisplayInventory: DisplaySnapshotProviding {
@@ -22,10 +23,18 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   private let sampleOnlineIDs: @Sendable () throws -> [UInt32]
   private let sampleActiveIDs: @Sendable () throws -> [UInt32]
   private let retryDelayMicroseconds: useconds_t
+  private var namesOnMainThread = false
 
   public init() {
     self.init(
       candidateDetector: ResolverDDCCandidateDetector(resolver: IORegistryDDCServiceResolver()))
+  }
+
+  /// For an app whose main thread runs AppKit: display names are read there. The CLI must not
+  /// use this: macOS then waits about 10 s for the CLI to handle each display change.
+  public init(namesOnMainThread: Bool) {
+    self.init()
+    self.namesOnMainThread = namesOnMainThread
   }
 
   /// Tests inject the online and active ID samples; they default to Core Graphics.
@@ -63,7 +72,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     guard activeIDSet.isSubset(of: onlineIDs) else {
       throw DisplayControlError.inventoryChanged
     }
-    let localizedNames = Self.localizedNames(for: activeIDSet)
+    let localizedNames = localizedNames(for: activeIDSet)
 
     var metadata: [UInt32: DisplayMetadata] = [:]
     metadata.reserveCapacity(onlineIDs.count)
@@ -90,7 +99,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isMain: CGDisplayIsMain(displayID) != 0,
         vendorNumber: CGDisplayVendorNumber(displayID),
         modelNumber: CGDisplayModelNumber(displayID),
-        localizedName: localizedNames[displayID]
+        localizedName: localizedNames[displayID],
+        isPlaceholder: Self.isPlaceholder(displayID)
       )
     }
 
@@ -100,6 +110,41 @@ public struct DisplayInventory: DisplaySnapshotProviding {
       metadata: metadata
     )
     return Self.applyingDDCCapabilities(to: displays, detector: candidateDetector)
+  }
+
+  /// The macOS placeholder signature seen on macOS 27.0.1 (D-012): vendor 'unkn', model 'virt',
+  /// serial 0. Size and mode are not used: they differ between processes for the same display.
+  static func isPlaceholder(vendorNumber: UInt32, modelNumber: UInt32, serialNumber: UInt32)
+    -> Bool
+  {
+    vendorNumber == placeholderVendor && modelNumber == placeholderModel && serialNumber == 0
+  }
+
+  private static let placeholderVendor: UInt32 = 0x756E_6B6E  // 'unkn'
+  private static let placeholderModel: UInt32 = 0x7669_7274  // 'virt'
+
+  static func isPlaceholder(_ displayID: CGDirectDisplayID) -> Bool {
+    isPlaceholder(
+      vendorNumber: CGDisplayVendorNumber(displayID), modelNumber: CGDisplayModelNumber(displayID),
+      serialNumber: CGDisplaySerialNumber(displayID))
+  }
+
+  /// The placeholder signals Core Graphics reports for each online display, for diagnostics.
+  public static func placeholderDiagnostics() -> [String] {
+    ((try? onlineDisplayIDs()) ?? []).map { id in
+      "id=\(id) vendor=\(CGDisplayVendorNumber(id)) model=\(CGDisplayModelNumber(id))"
+        + " serial=\(CGDisplaySerialNumber(id)) placeholder=\(isPlaceholder(id))"
+    }
+  }
+
+  /// Active displays minus placeholders; cheap enough for the safety net's periodic check.
+  static func usableActiveCount(activeIDs: [UInt32], isPlaceholder: (UInt32) -> Bool) -> Int {
+    activeIDs.filter { !isPlaceholder($0) }.count
+  }
+
+  /// The live usable active count, without a full inventory; throws if the active list fails.
+  public static func usableActiveDisplayCount() throws -> Int {
+    usableActiveCount(activeIDs: try activeDisplayIDs(), isPlaceholder: isPlaceholder(_:))
   }
 
   /// The UUID Core Graphics maps `runtimeID` to right now, or nil when it maps none.
@@ -140,7 +185,8 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isOnline: true,
         isActive: isActive,
         isMain: isActive && displayMetadata.isMain,
-        ddcCapability: .unknown
+        ddcCapability: .unknown,
+        isPlaceholder: displayMetadata.isPlaceholder
       )
     }
 
@@ -166,7 +212,9 @@ public struct DisplayInventory: DisplaySnapshotProviding {
         isOnline: display.isOnline,
         isActive: display.isActive,
         isMain: display.isMain,
-        ddcCapability: detector.capability(for: display)
+        // The placeholder has no DDC bus, so skip the registry lookup.
+        ddcCapability: display.isPlaceholder ? .unsupported : detector.capability(for: display),
+        isPlaceholder: display.isPlaceholder
       )
     }
   }
@@ -235,7 +283,15 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     throw DisplayControlError.inventoryChanged
   }
 
-  private static func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
+  /// With `namesOnMainThread`, a caller on another thread waits for the main thread to read NSScreen.
+  private func localizedNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
+    guard !namesOnMainThread || Thread.isMainThread else {
+      return DispatchQueue.main.sync { Self.screenNames(for: activeIDs) }
+    }
+    return Self.screenNames(for: activeIDs)
+  }
+
+  private static func screenNames(for activeIDs: Set<UInt32>) -> [UInt32: String] {
     let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
 
     return NSScreen.screens.reduce(into: [:]) { result, screen in
