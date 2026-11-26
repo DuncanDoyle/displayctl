@@ -2,12 +2,12 @@ Cross-model: YES (author: openai/Codex for 699b839..c324c9c, reviewer: anthropic
 cli: claude · resolved_model: claude-opus-5-5 · status: failed (repo changed; see runner note)
 Scope: phase 1 (Codex-authored range)
 Dimensions: both
-Diff: 699b839..c324c9c (code), checked against f1b688e
+Diff: 699b839..c324c9c (code), checked against 420c8b0
 Timing: on time
 Runner note: run-reviewer.sh reported "repository changed during the run" because the parallel Codex review wrote phase-codex.md into the repo meanwhile; the before/after fingerprints differ only by that file. The reviewer changed nothing. Report copied from the runner diagnostics.
 ---
 
-**There are no P1 or P2 findings.** I checked every finding against the current files at HEAD (`f1b688e`). Claude's later commits replaced or fixed most of the Codex code that carried risk:
+**There are no P1 or P2 findings.** I checked every finding against the current files at HEAD (`420c8b0`). Claude's later commits replaced or fixed most of the Codex code that carried risk:
 
 - **Hardware script:** fully rewritten, with a watchdog.
 - **Lock:** moved to `~/Library/Application Support/displayctl/`.

@@ -2,7 +2,7 @@
 
 ## Phase
 Phase: 2 — Menu bar app (D-009)
-Base: f39f451ee8addf1063cc400d130ca35dc2d7ded4 (code; Phase 2 design docs began at 7aa83e3)
+Base: 860cbeab7e5656e8984eea68250c1bf4e6248436 (code; Phase 2 design docs began at 7aa83e3)
 Author: anthropic (claude-opus-5-5)
 Advisory: none
 Docs: docs/phases/phase-2/
@@ -40,7 +40,7 @@ none
 - (P4 architecture) Phase 3: shared brightness boundary so keys and slider writes are ordered — src: phases/phase-2/reviews/design-codex.md#11
 
 ## Notes
-- 2026-11-26: Phase 1 closed (docs/phases/phase-1/phase-1-complete.md). No Phase 2 code was written while it was open (D-009). Phase 1 status notes, including hardware runs 1–4: `git show f39f451:docs/phase-status.md`.
+- 2026-11-26: Phase 1 closed (docs/phases/phase-1/phase-1-complete.md). No Phase 2 code was written while it was open (D-009). Phase 1 status notes, including hardware runs 1–4: `git show 860cbea:docs/phase-status.md`.
 - 2026-11-25: Phase 2 design + plan reviewed twice by Codex (reviews/design-codex.md, design2-codex.md), triaged. The loop stopped with P2 findings resolved on paper but not re-reviewed, by owner decision ("Stop design reviews here?" → "yes"); the Phase 2 code review must check them.
 - 2026-11-26: Phase 2 design and plan amended after the Phase 1 reviews: typed `lockTimeout`/`inventoryChanged` errors, unsandboxed app, ledger rows per boot (orphans from re-cabling still show).
 - Build/test: `swift test --parallel --scratch-path .agents-tmp/build`.

@@ -64,3 +64,9 @@ Hardware testing does the internal display first (the main use case, with the De
 **Decision:** Reboot is a verified last resort: the built-in display came back on its own after the reboot (macOS 27.0.1). The ledger kept its entry from the earlier boot. A later `connect all` found the UUID already active, removed the entry and exited 0. Recovery order stays `connect all`, then reboot. No ledger rule change is needed.
 **Alternatives:** none — observed behaviour.
 **Consequences:** Answers D-008's open question and Phase 2 design §9's reboot risk. After a reboot an earlier-boot entry can linger until the next `connect all` or `connect <that display>`; it is harmless because the display is already active.
+
+## D-011 — Second history rewrite to remove local paths (2026-11-26)
+**Context:** Reviewer reports link files by absolute local path. Five review files committed and pushed on 2026-11-25 and 2026-11-26 contained the owner's local checkout path (Phase 2 code review, finding 8).
+**Decision:** `git filter-repo` replaced the local paths in every commit, as in D-007. SHAs cited in the docs were updated mechanically; `main` was force-pushed. A pre-commit hook (`.githooks/pre-commit`, enabled with `git config core.hooksPath .githooks`) and `Scripts/check-local-paths.sh` now block local paths, and `AGENTS.md` states the rule. Owner: "Rewrite history. And add something somewhere (AGENTS.md?) so this won't happen again."
+**Alternatives:** Leaving the old commits as they are (the path stays public).
+**Consequences:** SHAs in chat logs and earlier sessions no longer match. Other clones must re-clone or reset to the new `main`.

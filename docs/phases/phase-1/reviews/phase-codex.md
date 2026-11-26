@@ -1,14 +1,14 @@
-Cross-model: YES (author: anthropic/claude-opus-5-5 for c324c9c..f1b688e, reviewer: openai/gpt-6.2-sol, command: codex)
+Cross-model: YES (author: anthropic/claude-opus-5-5 for c324c9c..420c8b0, reviewer: openai/gpt-6.2-sol, command: codex)
 cli: codex · resolved_model: gpt-6.2-sol · status: ok
 Scope: phase 1 (Claude-authored range)
 Dimensions: both (architecture weighted)
-Diff: c324c9c..f1b688e
+Diff: c324c9c..420c8b0
 Timing: on time
 ---
 
 ## Phase 1 review
 
-**Request changes before closing Phase 1.** I found one P1 in last-display protection and two P2s in hardware recovery and HDMI validation. Scope was the Claude-authored range `c324c9c..f1b688e`.
+**Request changes before closing Phase 1.** I found one P1 in last-display protection and two P2s in hardware recovery and HDMI validation. Scope was the Claude-authored range `c324c9c..420c8b0`.
 
 1. **P1 · correctness · `ConnectionController.swift:284`, `:382` — Disconnect can report success with zero active displays.** With the built-in panel and Dell active, unplugging the Dell after `disconnect internal` samples the inventory can leave the built-in panel as the only active display before the disable commits. The ledger write sits between the last-active check and the transaction. The lock serializes cooperating callers, but a physical unplug can still occur. If the refresh then consistently reports zero active displays, D-005’s target-absence branch returns success and skips rollback. Before accepting a disable, verify that an active display remains. If none does, attempt the existing rollback and report the failure. A regression test can remove the other display between validation and the hardware call. [ConnectionController.swift:284](Sources/DisplayControlCore/ConnectionController.swift:284) · [ConnectionController.swift:382](Sources/DisplayControlCore/ConnectionController.swift:382) · [design.md:241](docs/phases/phase-1/design.md:241)
 

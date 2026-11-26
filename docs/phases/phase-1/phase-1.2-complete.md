@@ -1,7 +1,7 @@
 # Phase 1.2 — Phase 1 review fixes (Complete)
 
 **Completed:** 2026-11-26
-**Range:** a26062e..the commit that adds this file
+**Range:** a6c1ff2..the commit that adds this file
 
 ## Summary
 `disconnect` no longer reports success when no display is left active: it fails and attempts a rollback. A display list read while the setup changes is read again (3 samples in total) before failing. "Another `displayctl` is running" and "the display setup kept changing" are now their own errors, and they and an invalid DDC reply exit 75 (temporary, try again). The Phase 1 design and plan match the code and decisions D-002 to D-010.

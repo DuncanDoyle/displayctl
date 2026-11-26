@@ -1,7 +1,7 @@
 # Sub-phase 1.2 — Phase 1 review fixes
 
 Kind: stabilization
-Base: a26062e
+Base: a6c1ff2
 Issues: none (queue in phase-status.md) | Plan steps: Phase 1 close; findings in reviews/phase-codex.md, phase-claude.md, design-claude.md
 
 ## Problem / goal
@@ -53,5 +53,5 @@ Phase 1 design §6.3, §7, §8 and the plan's API sections updated to the shippe
 ## Definition of done
 - [ ] acceptance tests fail before, pass after (report both)
 - [ ] full test suite passes; `swift format lint` clean
-- [ ] cross-model review of `git diff a26062e..HEAD` + triage
+- [ ] cross-model review of `git diff a6c1ff2..HEAD` + triage
 - [ ] phase-1.2-complete.md written; phase-status.md updated
