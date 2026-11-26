@@ -63,6 +63,7 @@ displayctl (CLI)        displayctl-menu (launchd agent)
 - `DisplayControlCore` gains `ZeroActiveRecovery`: the safety-net policy, UI-free, so Phase 3 can reuse it. Its inputs are a display snapshot, the ledger and `connectAll`; its clock and sleep are injectable.
 - New library target `DisplayMenuKit`: the panel's state model (rows, switch enablement, busy and error state), operation dispatch, and the brightness coalescer. No SwiftUI views, so it is unit-testable.
 - New executable target `displayctl-menu`: the `MenuBarExtra` scene, views, the display-reconfiguration and wake observers, and process lifecycle. Kept thin.
+- The app is not sandboxed: a sandbox would move `~/Library/Application Support` into the app's container and split the ledger and lock from the CLI's.
 - The CLI is unchanged. Both processes use the same `ConnectionController` (same ledger, same `flock` lock), so a CLI change and a menu change cannot both pass the last-active check.
 - `ConnectionController` gains `recoverIfNoneActive()`: under the operation lock it takes a snapshot and returns `nil` if any display is active; otherwise it runs the same body as `connectAll`. The zero-active check and the mutation therefore happen under one lock, so a CLI `connect` that wins the lock first is never followed by recovery turning on other displays. `connectAll` keeps its unconditional behaviour.
 
@@ -91,7 +92,7 @@ Clicking it opens:
 ```
 
 Rows:
-- One row per online display, plus one per ledger entry that macOS no longer lists (D-005). Ledger-only rows show as off.
+- One row per online display, plus one per ledger entry from the current boot that macOS no longer lists (D-005). Ledger-only rows show as off. Entries from an earlier boot, or orphans left when a display was re-cabled while off (its UUID changes per connection path), get no row; `displayctl forget` removes them.
 - Switch on = display active. Turning it off calls `disconnect <uuid>`; turning it on calls `connect <uuid>`.
 - The switch of the last active display is disabled, with a short caption ("Only active display"). The controller still enforces the rule; the UI only avoids offering it.
 - While an operation runs, every switch is disabled and the row shows a spinner. Operations run off the main thread, one at a time.
@@ -123,7 +124,7 @@ On a trigger:
 2. Call `recoverIfNoneActive()`. It checks and acts under the operation lock (§5). `nil` means a display is active: done.
 3. Otherwise check the result. Recovery succeeded if a fresh snapshot shows at least one active display. Every failed outcome is logged with its display and reason, including a refused earlier-boot entry and an unreadable ledger (returned as an outcome with no display).
 4. If still no display is active, retry (default 3 attempts in total, 2 s apart). A thrown error, such as a lock timeout while a CLI command runs, counts as a failed attempt.
-5. An inconsistent sample ("inventory changed while sampling"), whether from the locked check or the verification, is not an attempt: it is sampled again after the retry delay, up to 5 times per episode. If those run out, the episode ends as inconclusive.
+5. An inconsistent sample (`inventoryChanged`, thrown after the inventory's own 3 quick retries), whether from the locked check or the verification, is not an attempt: it is sampled again after the retry delay, up to 5 times per episode. If those run out, the episode ends as inconclusive.
 6. Log every decision with `os.Logger` (subsystem `displayctl`, category `recovery`), including the trigger that started the episode.
 
 Episodes: the attempts above form one episode, and only one runs at a time. Triggers that arrive during an episode, including callbacks caused by its own enable calls, are dropped; the episode re-checks on its own. After an episode:

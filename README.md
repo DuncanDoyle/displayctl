@@ -87,8 +87,8 @@ because Core Graphics inventory is login-session scoped. That is not hardware
 acceptance: interactive validation requires both the internal display and a
 physically connected external display to appear with stable UUIDs.
 
-Connection changes use the session configuration scope, but on macOS 27 they
-survive logout/login (D-008). Disconnect refuses to remove the last active display.
+Connection changes use the session configuration option, but on macOS 27 they survive logout/login (D-008). A reboot undoes them (D-010).
+Disconnect refuses to remove the last active display.
 A cross-process lock serializes connection operations so simultaneous CLI
 processes cannot both pass the last-active check against stale state. There is
 no `--force` option.
@@ -105,7 +105,7 @@ Errors are written to standard error. The main exit categories are:
 - `0`: command completed successfully.
 - `64`: invalid command, selector syntax, or brightness value.
 - `69`: required private API or usable DDC service is unavailable/unsupported.
-- `75`: temporary DDC timeout or transport failure.
+- `75`: temporary failure, try again: DDC timeout, transport failure or invalid reply; another `displayctl` holds the lock; the display setup kept changing while it was read.
 - `1`: other selection, state, safety, configuration, response, or verification
   failure, including last-active-display refusal.
 
@@ -197,9 +197,6 @@ A partial run on macOS Tahoe 26.5, with the built-in display and a Dell U2720Q o
 
 ## Roadmap
 
-Phase 1 covers the CLI, display inventory/selection, safe session-scoped
-connection changes, external hardware brightness, automated tests, and hardware
-validation. Phase 2 is separately gated work for mouse-targeted keyboard
-brightness handling and automatic recovery from zero active displays. Phase 3
-is a separately designed native menu-bar interface. Neither later phase is part
-of this implementation.
+Phase 1 covers the CLI, display inventory and selection, safe connection changes, external hardware brightness, automated tests, and hardware validation.
+
+Phase 2 is a menu bar app with an on/off switch per display, a brightness slider for DDC-capable external displays, and automatic recovery when no display is active (D-009). Phase 3 is the keyboard brightness agent, where the brightness keys follow the mouse pointer. Neither later phase is part of this implementation.

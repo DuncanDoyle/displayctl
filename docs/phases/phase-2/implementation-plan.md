@@ -105,7 +105,7 @@ public actor RecoveryScheduler {
   public func trigger(_ trigger: RecoveryTrigger)
 }
 ```
-An inconsistent-sample error is `.configurationFailed` whose message contains `"changed while sampling"`, from either the connector or the sampler; it is resampled after `retryDelay` and does not count as an attempt.
+An inconsistent-sample error is `DisplayControlError.inventoryChanged`, from either the connector or the sampler; it is resampled after `retryDelay` and does not count as an attempt. A lock timeout is `DisplayControlError.lockTimeout`.
 
 - [ ] **Step 1: Write failing `ConnectionControllerTests`** (existing `FakeDisplayStore`, `makeController`):
   - `testRecoverIfNoneActiveReturnsNilWhenADisplayIsActive` → `nil`, no hardware requests.
@@ -116,9 +116,9 @@ An inconsistent-sample error is `.configurationFailed` whose message contains `"
   - `testRecoveredWhenSnapshotShowsActiveAfterAttempt` → `.recovered(attempts: 1)`.
   - `testReturnedFailuresAreLoggedIncludingLedgerOutcome` → connector returns `[failure(.recoverySkipped("earlier boot")), DisplayConnectionOutcome(display: nil, result: .failure(.configurationFailed("ledger unreadable")))]` → log lines contain `"earlier boot"` and `"ledger unreadable"`.
   - `testPartialRecoveryCountsAsRecovered` → one success, one failure, snapshot shows active → `.recovered(attempts: 1)`, failure logged.
-  - `testLockTimeoutCountsAsFailedAttemptAndRetries` → throws `.configurationFailed("flock timed out …")` twice then succeeds → `.recovered(attempts: 3)`, sleeps `[.seconds(2), .seconds(2)]`.
+  - `testLockTimeoutCountsAsFailedAttemptAndRetries` → throws `.lockTimeout` twice then succeeds → `.recovered(attempts: 3)`, sleeps `[.seconds(2), .seconds(2)]`.
   - `testGivesUpAfterMaxAttempts` → `.failed(attempts: 3)`, connector calls 3.
-  - `testInconsistentSampleFromVerificationIsNotAnAttempt` → sampler throws `"Display inventory changed while sampling; retry"` twice, then shows active → `.recovered(attempts: 1)`, sleeps include two `.seconds(2)`.
+  - `testInconsistentSampleFromVerificationIsNotAnAttempt` → sampler throws `.inventoryChanged` twice, then shows active → `.recovered(attempts: 1)`, sleeps include two `.seconds(2)`.
   - `testInconsistentSampleFromLockedCheckIsNotAnAttempt` → connector throws the same error twice, then returns outcomes and the sampler shows active → `.recovered(attempts: 1)`.
   - `testInconclusiveAfterFiveInconsistentSamples` → `.inconclusive`.
 - [ ] **Step 3: Write failing `RecoverySchedulerTests`** (same file):
@@ -156,6 +156,7 @@ public final class BlockingExecutor: Sendable {
 public protocol DisplayOperating: Sendable {   // async; live adapter uses BlockingExecutor
   func snapshot() async throws -> [Display]
   func disabledDisplays() async throws -> [DisabledDisplayEntry]
+  func bootSession() async throws -> String   // live: BootSession.current(), made public in this task
   func connect(_ uuid: UUID) async throws -> Display
   func disconnect(_ uuid: UUID) async throws -> Display
 }
@@ -173,7 +174,8 @@ public struct DisplayRow: Equatable, Identifiable, Sendable {
 }
 
 public enum PanelRows {
-  public static func make(displays: [Display], ledger: [DisabledDisplayEntry],
+  /// Ledger entries from another boot get no row (design §6.1).
+  public static func make(displays: [Display], ledger: [DisabledDisplayEntry], currentBoot: String,
                           busy: UUID?, errors: [UUID: String]) -> [DisplayRow]
 }
 
@@ -191,11 +193,11 @@ public final class PanelModel {
   public func setDisplay(_ id: UUID, on: Bool) async
 }
 ```
-`ErrorText.short`: `.lastActiveDisplay` → `"Cannot turn off the only active display"`; `.configurationFailed` starting with `"flock timed out"` → busy text; other `DisplayControlError` → its message (fixed short phrase for cases without one); others → `localizedDescription`.
+`ErrorText.short`: `.lastActiveDisplay` → `"Cannot turn off the only active display"`; `.lockTimeout` → busy text; `.inventoryChanged` → `"Displays changed while reading them. Try again."`; other `DisplayControlError` → its message (fixed short phrase for cases without one); others → `localizedDescription`.
 
 Ordering rule (design §6.1): every snapshot request (a `refresh`, or the snapshot at the end of `setDisplay`) takes `seq += 1` when issued; it is published to `rows` only if `seq > publishedSeq`, then `publishedSeq = seq`. `setDisplay` sets its row's busy flag and error when it finishes, regardless of `seq`. `PanelModel` also has `public func panelClosed()`; `panelOpened()` and `panelClosed()` set `isOpen`.
 
-- [ ] **Step 1: Write failing `PanelRowsTests`:** `testBuiltInFirstThenExternalsByName`, `testLedgerOnlyDisplayIsAnOffRow`, `testOnlineDisplayWinsOverItsLedgerEntry`, `testOnlyActiveDisplaySwitchDisabledWithCaption`, `testAllSwitchesDisabledWhileBusy`, `testShowsBrightnessOnlyForActiveExternalNotUnsupported`.
+- [ ] **Step 1: Write failing `PanelRowsTests`:** `testBuiltInFirstThenExternalsByName`, `testLedgerOnlyDisplayIsAnOffRow`, `testEarlierBootLedgerEntryHasNoRow`, `testOnlineDisplayWinsOverItsLedgerEntry`, `testOnlyActiveDisplaySwitchDisabledWithCaption`, `testAllSwitchesDisabledWhileBusy`, `testShowsBrightnessOnlyForActiveExternalNotUnsupported`.
 - [ ] **Step 2: Write failing `PanelModelTests`** (fake `DisplayOperating` with scripted results and per-call gates):
   - `testRefreshBuildsRows`
   - `testTurnOffCallsDisconnectThenRefreshes`

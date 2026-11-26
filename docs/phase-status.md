@@ -36,14 +36,14 @@ Bug fixes, the two error cases, tests and docs per the brief.
 New features, architecture changes, new dependencies; Phase 2 code.
 
 ### Queue
-- [ ] Q1 (P1 correctness) disconnect can leave no active display — src: reviews/phase-codex.md#1, design-claude.md#7 ← CURRENT
-- [ ] Q2 (P3 architecture) snapshot retries an inconsistent sample; `inventoryChanged` case — src: design-claude.md#6
-- [ ] Q3 (P4 architecture) `lockTimeout` case, exit 75 — src: design-claude.md#9
-- [ ] Q4 (P4 correctness) `ddcInvalidResponse` exits 75 — src: phase-claude.md#5
-- [ ] Q5 (P3 correctness) production identity through the matcher — src: phase-claude.md#2
-- [ ] Q6 (P3 architecture) transaction table package-visible — src: phase-codex.md#4
-- [ ] Q7 (P2 correctness) Phase 1 design/plan in sync; serial-only DDC and per-path UUID documented — src: design-claude.md#1–#4, #11
-- [ ] Q8 Codex review of a26062e..HEAD + triage
+- [x] Q1 (P1 correctness) disconnect can leave no active display — 1201d9a: transition accepted target absence without checking that another display stayed active; now fails and rolls back
+- [x] Q2 (P3 architecture) snapshot retries an inconsistent sample; `inventoryChanged` case — src: design-claude.md#6 — 1201d9a
+- [x] Q3 (P4 architecture) `lockTimeout` case, exit 75 — src: design-claude.md#9 — 1201d9a
+- [x] Q4 (P4 correctness) `ddcInvalidResponse` exits 75 — src: phase-claude.md#5 — 1201d9a
+- [x] Q5 (P3 correctness) production identity through the matcher — src: phase-claude.md#2 — 1201d9a
+- [x] Q6 (P3 architecture) transaction table package-visible — src: phase-codex.md#4 — 1201d9a
+- [x] Q7 (P2 correctness) Phase 1 design/plan in sync; serial-only DDC and per-path UUID documented — src: design-claude.md#1–#4, #11
+- [ ] Q8 Codex review of a26062e..HEAD + triage ← CURRENT
 
 ## Program
 none

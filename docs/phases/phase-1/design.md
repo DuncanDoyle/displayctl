@@ -4,7 +4,7 @@
 
 - Phase: 1 — CLI hardware validation
 - Status: Approved design
-- Initial platform: Apple Silicon M5 Mac running macOS Tahoe 26.5; now macOS 27.0.1 (D-002)
+- Target platform: Apple Silicon M5 Mac running macOS 27.0.1 (D-002). The first design and hardware run used macOS Tahoe 26.5.
 - Initial display connections: HDMI, with USB-C compatibility evaluated separately
 - Language: Swift
 
@@ -27,7 +27,7 @@ Development is divided into phases so the private macOS hardware-control mechani
 - The implementation must be self-contained and must not require BetterDisplay at runtime.
 - Private macOS APIs are acceptable because the initial tool is for personal use.
 - Private API usage must be isolated so future macOS compatibility work has a narrow scope.
-- The initial supported operating system is macOS Tahoe 26.5.
+- The supported operating system is macOS 27.0.1 (D-002). The first design targeted macOS Tahoe 26.5.
 - The initial supported architecture is Apple Silicon.
 - True hardware brightness control is required. Software gamma or overlay dimming is not an acceptable fallback.
 - A display disconnect should remove the display from the active desktop layout where the operating system permits it.
@@ -98,7 +98,7 @@ If a symbol is absent or incompatible, the CLI exits with a clear unsupported-pl
 
 The inventory queries active and online Core Graphics display lists and builds a `Display` value containing:
 
-- Stable display UUID.
+- Display UUID, stable for one connection path.
 - Current `CGDirectDisplayID` runtime identifier.
 - Human-readable name when available.
 - Internal or external classification.
@@ -107,9 +107,11 @@ The inventory queries active and online Core Graphics display lists and builds a
 - Main-display state.
 - Candidate hardware-brightness capability.
 
-Stable UUID is the canonical identifier. Runtime display IDs can change and are only convenience selectors.
+The UUID is the canonical identifier. Runtime display IDs can change and are only convenience selectors.
 
-Soft-disconnected displays must remain discoverable through the online display inventory for reconnection. If Tahoe does not expose a disabled display through that inventory, Phase 1 stabilization must add the smallest persistent identity record needed for recovery before the connect command is considered complete.
+The UUID is stable only while the display uses the same cable and port. The Dell U2720Q got a different UUID over HDMI than over USB-C. If a display is disabled and then re-cabled, its ledger entry (§6.3.1) no longer matches any display. That orphan entry stays until `displayctl forget` removes it. This is a known limitation.
+
+If the display list changes while it is read, `snapshot()` retries the sample up to 3 times, 20 ms apart. After that it throws `inventoryChanged`.
 
 Soft-disconnected displays leave the online display inventory on macOS 26.5 and 27 (D-005). The ledger (§6.3.1) is the persistent identity record that makes them reachable again.
 
@@ -134,13 +136,13 @@ Connection changes use this sequence:
 5. For disconnect, prove that another active display will remain.
 6. Begin a Core Graphics display configuration transaction.
 7. Invoke `CGSConfigureDisplayEnabled` through the private bridge.
-8. Complete the transaction for the current login session.
-9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005).
+8. Complete the transaction with the session configuration option (`.forSession`). Despite its name, the change survives logout (D-008). A reboot undoes it (D-010).
+9. Refresh inventory and verify the expected postcondition unambiguously. After a disable, a UUID absent from the online list counts as disconnected (D-005). After a disable, at least one display must still be active; if none is, the disconnect fails and is rolled back.
 10. Release the display-operation lock.
 
-If configuration fails before completion, the transaction is cancelled. On macOS 27 a session-scoped disable survives logout/login, so logout is not a recovery boundary (D-008). Recovery is `displayctl connect all` from the ledger, then a reboot, which restores the display (D-010).
+If configuration fails before completion, the transaction is cancelled. On macOS 27 a disable survives logout/login, so logout is not a recovery boundary (D-008). Recovery is `displayctl connect all` from the ledger, then a reboot, which restores the display (D-010).
 
-The operation lock uses Darwin `flock` on a lock file in the logged-in user's temporary directory. It serializes the complete validation and mutation sequence across threads, controller instances, and CLI processes. Acquisition uses bounded waiting and fails clearly rather than hanging indefinitely. The operating system releases the advisory lock when a process exits or crashes.
+The operation lock uses Darwin `flock` on a lock file in `~/Library/Application Support/displayctl/` (§6.3.1). It serializes the complete validation and mutation sequence across threads, controller instances, and CLI processes. Acquisition uses bounded waiting and fails with `lockTimeout` rather than hanging indefinitely. The operating system releases the advisory lock when a process exits or crashes.
 
 #### 6.3.1 Disabled-display ledger (D-003)
 
@@ -151,19 +153,20 @@ macOS can drop a soft-disabled display from the online display list, so the inve
 - A connect resolves its selector against the inventory and the ledger, by UUID first (D-004). If the UUID is online, its current runtime ID is used. An offline entry is enabled by its recorded runtime ID only when the entry is from the current boot (`kern.bootsessionuuid`), no online display of another UUID holds that ID, and Core Graphics does not map that ID to another UUID right before the enable. Otherwise the entry is reported and skipped. The disconnect rollback follows the same rule.
 - An entry is removed only once its UUID is verified active again, or when the user runs `displayctl forget`. Entries whose state is uncertain are kept.
 - Entries from an earlier boot are kept for reporting but never trigger a mutation.
+- An entry whose display was re-cabled while disabled gets a new UUID (§6.1), so the entry is orphaned. `connect all` reports it as a failure until `displayctl forget <uuid|all>` removes it.
 - Identity checks and per-display outcomes stay in `DisplayControlCore`; the CLI only maps them to exit codes, so Phase 2 can reuse them under the lock.
 
 #### 6.3.2 Trial disconnect — removed (D-006)
 
 An app-only `--trial` mode was designed here (D-004). On macOS 27 the app-only scope does not undo a `CGSConfigureDisplayEnabled` disable at process exit, so the mode was removed (D-006). The watchdog and the ledger are the safety net.
 
-There is no force option for disconnecting the final active display. `connect all` is idempotent: a candidate that becomes active before its turn is treated as a successful recovery. Every `connect all` outcome carries the original candidate display identity alongside its typed success or failure so callers can report results independently.
+There is no force option for disconnecting the final active display. `connect all` is idempotent: a candidate that becomes active before its turn is treated as a successful recovery. Every `connect all` outcome carries the original candidate display identity alongside its typed success or failure so callers can report results independently. The one exception is an unreadable ledger: it is reported as a last failed outcome whose `display` is nil, and the online displays are still attempted.
 
 ### 6.4 DDC service matching
 
 External hardware brightness requires matching a Core Graphics display to its external `DCPAVServiceProxy`/`IOAVService`.
 
-Matching uses the strongest identifiers available from Core Display metadata, EDID-derived properties, and I/O Registry location. A match must exceed a defined confidence threshold. Multiple equally plausible services are treated as ambiguous and no write is attempted.
+Matching works only through the numeric EDID serial number, checked together with the vendor and product IDs. The display side never fills in a location or an EDID UUID, so those identifiers cannot produce a match. A monitor whose EDID serial is 0 is therefore reported as unsupported. This is a known limitation. A match must exceed a defined confidence threshold. Multiple equally plausible services are treated as ambiguous and no write is attempted.
 
 The distinction between capability states is explicit:
 
@@ -202,11 +205,12 @@ displayctl list [--json]
 displayctl connect <selector>
 displayctl connect all
 displayctl disconnect <selector>
+displayctl forget <uuid|all>
 displayctl brightness get <selector>
 displayctl brightness set <selector> <0...100>
 ```
 
-Brightness commands accept external displays only in Phase 1.
+Brightness commands accept external displays only in Phase 1. `forget` removes ledger entries (§6.3.1) without touching any display.
 
 ### 7.2 Output
 
@@ -232,6 +236,9 @@ The core distinguishes at least these failure categories:
 - Required private API unavailable.
 - Core Graphics transaction failure.
 - Postcondition verification failure.
+- Recovery skipped for a ledger entry that fails the identity rules (`recoverySkipped`).
+- Operation lock held by another process for the whole bounded wait (`lockTimeout`).
+- Display list still changing after the bounded retries (`inventoryChanged`).
 - DDC service not found.
 - Ambiguous DDC service match.
 - DDC unsupported.
@@ -274,7 +281,7 @@ Automated coverage includes:
 
 Hardware tests must be explicitly invoked and must identify potentially disruptive operations before running.
 
-The M5/Tahoe 26.5 validation matrix includes:
+The validation matrix runs on the M5 Mac with macOS 27.0.1 (D-002). It was first run on macOS Tahoe 26.5. It includes:
 
 1. List the internal and HDMI displays with stable identities.
 2. Read HDMI display brightness if the monitor supports read-back.
@@ -287,7 +294,7 @@ The M5/Tahoe 26.5 validation matrix includes:
 
 The hardware test starts with the internal display. The external display follows only after a separate opt-in (D-006).
 
-Before each session-scoped disconnect, the hardware test arms a watchdog that runs detached from the test's foreground flow, so it fires even when the user cannot type. The watchdog runs the disconnect as its own child, so it knows when the change has finished and can stop it at a deadline. Once it fires, no further disconnect runs in that test. It stays armed until the test has restored and verified the original set of active displays. If the user has not confirmed within the timeout (default 20 s), it retries `displayctl connect all` until that set is active again or a hard deadline passes, and the test stops; another disconnect needs a fresh opt-in. The internal display is tested before the external one, and every external disable, including test setup, needs the internal pass and an explicit opt-in (D-003, D-004).
+Before each disconnect, the hardware test arms a watchdog that runs detached from the test's foreground flow, so it fires even when the user cannot type. The watchdog runs the disconnect as its own child, so it knows when the change has finished and can stop it at a deadline. Once it fires, no further disconnect runs in that test. It stays armed until the test has restored and verified the original set of active displays. If the user has not confirmed within the timeout (default 20 s), it retries `displayctl connect all` until that set is active again or a hard deadline passes, and the test stops; another disconnect needs a fresh opt-in. The internal display is tested before the external one, and every external disable, including test setup, needs the internal pass and an explicit opt-in (D-003, D-004).
 
 Tests must restore the initial display state when possible. Failures must print manual recovery instructions, led by `displayctl connect all` (D-008).
 
@@ -300,6 +307,8 @@ Deliver the inventory, selector, connection controller, external DDC brightness 
 A stabilization checkpoint follows Phase 1. Private APIs and both connection types are assessed before Phase 2 begins.
 
 ### 10.2 Phase 2 — Keyboard brightness agent
+
+> Superseded by D-009: Phase 2 is now the menu bar app, with the zero-active-display recovery below. The keyboard agent is Phase 3, without the recovery part. §10.2 and §10.3 are kept as history.
 
 Add a background agent that:
 
@@ -322,6 +331,8 @@ Phase 2 automated tests must cover zero-active-display detection, startup reconc
 Phase 2 requires its own approved implementation-plan section before implementation.
 
 ### 10.3 Phase 3 — Menu-bar application
+
+> Superseded by D-009: the menu bar app is now Phase 2 (see the note in §10.2).
 
 Add a native menu-bar application that:
 
@@ -352,7 +363,7 @@ Mac App Store distribution is not a design goal because the required private API
 - Phase 1 implementation is expected to add more than five files. Human approval is required after reviewing `implementation-plan.md` and before implementation begins.
 - Any public API, architecture, dependency, storage-format, or scope change requires a design and plan update before code changes.
 - Refactoring unrelated code is out of scope.
-- Phase 2 and Phase 3 must not begin during Phase 1 implementation or stabilization without explicit approval.
+- Phase 2 and Phase 3 must not begin during Phase 1 implementation or stabilization without explicit approval. Superseded by D-009 for design work only: Phase 2 design and plan may start while Phase 1 is open, but no Phase 2 code before Phase 1 closes.
 
 ## 13. Acceptance Criteria
 

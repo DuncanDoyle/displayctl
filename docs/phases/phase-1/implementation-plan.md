@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a self-contained Swift CLI that lists displays, safely soft-connects and soft-disconnects them, and reads or sets external hardware brightness through DDC/CI on the target M5 Mac running macOS Tahoe 26.5.
+**Goal:** Build a self-contained Swift CLI that lists displays, safely soft-connects and soft-disconnects them, and reads or sets external hardware brightness through DDC/CI on the target M5 Mac running macOS 27.0.1 (D-002). The plan was first written for macOS Tahoe 26.5.
 
-**Architecture:** A thin `displayctl` executable calls a reusable `DisplayControlCore` library. Hardware access is hidden behind protocols and dynamically resolved private-API adapters, allowing deterministic tests and clean failure when Tahoe symbols are unavailable.
+**Architecture:** A thin `displayctl` executable calls a reusable `DisplayControlCore` library. Hardware access is hidden behind protocols and dynamically resolved private-API adapters, allowing deterministic tests and clean failure when the private macOS symbols are unavailable.
 
 **Tech Stack:** Swift 6.2 language mode, Swift Package Manager, Foundation, CoreGraphics, AppKit, IOKit, Darwin dynamic loading, XCTest.
 
@@ -17,6 +17,8 @@ Phase 1 creates more than five files and exceeds the repository change-size guar
 ## Scope
 
 This plan implements Phase 1 only. Phase 2 will add the login agent, mouse-targeted keyboard brightness handling, and zero-active-display recovery. Phase 3 will add the menu-bar UI. Neither later phase is implemented by this plan.
+
+> Superseded by D-009: Phase 2 is now the menu bar app with the zero-active-display recovery, and the keyboard agent is Phase 3.
 
 ## File Map
 
@@ -178,6 +180,9 @@ public enum DisplayControlError: Error, Equatable, Sendable {
     case unsupportedAPI(String)
     case configurationFailed(String)
     case postconditionFailed(String)
+    case recoverySkipped(String)
+    case lockTimeout
+    case inventoryChanged
     case ddcServiceNotFound
     case ddcServiceAmbiguous
     case ddcUnsupported
@@ -242,7 +247,7 @@ public struct DisplayInventory: DisplaySnapshotProviding {
 }
 ```
 
-The live implementation must call `CGGetOnlineDisplayList` and `CGGetActiveDisplayList` for count and values, then verify the count; when topology changes make the capacity, returned count, and verified count incoherent, retry from the count call with bounded attempts. For every online ID, use `CGDisplayCreateUUIDFromDisplayID`, `CGDisplayIsBuiltin`, `CGDisplayIsActive`, and `CGDisplayIsMain`. Use `NSScreen.localizedName` when an active screen matches `NSScreenNumber`; otherwise use `Built-in Display` or `External Display <vendor>:<model>` from Core Graphics numeric metadata. Sort internal first, then UUID text.
+The live implementation must call `CGGetOnlineDisplayList` and `CGGetActiveDisplayList` for count and values, then verify the count; when topology changes make the capacity, returned count, and verified count incoherent, retry from the count call with bounded attempts. `snapshot()` also retries a whole sample whose online and active lists disagree, up to 3 times, 20 ms apart, then throws `inventoryChanged`. For every online ID, use `CGDisplayCreateUUIDFromDisplayID`, `CGDisplayIsBuiltin`, `CGDisplayIsActive`, and `CGDisplayIsMain`. Use `NSScreen.localizedName` when an active screen matches `NSScreenNumber`; otherwise use `Built-in Display` or `External Display <vendor>:<model>` from Core Graphics numeric metadata. Sort internal first, then UUID text.
 
 - [ ] **Step 4: Run inventory and full tests**
 
@@ -361,23 +366,36 @@ public protocol DisplayConnectionHardware: Sendable {
 }
 
 public struct DisplayConnectionOutcome: Sendable {
-    public let display: Display
+    public let display: Display?  // nil only for the outcome of an unreadable ledger
     public let result: Result<Display, DisplayControlError>
 }
 
+public enum DisplayControlState {
+    public static var defaultDirectory: URL  // ~/Library/Application Support/displayctl/
+}
+
 public struct ConnectionController: Sendable {
-    public init(snapshot: any DisplaySnapshotProviding, hardware: any DisplayConnectionHardware)
+    public init(
+        snapshot: any DisplaySnapshotProviding,
+        hardware: any DisplayConnectionHardware,
+        stateDirectory: URL = DisplayControlState.defaultDirectory
+    )
     public func connect(_ selector: String) throws -> Display
     public func connectAll() throws -> [DisplayConnectionOutcome]
     public func disconnect(_ selector: String) throws -> Display
+    public func disabledDisplays() throws -> [DisabledDisplayEntry]
+    public func forget(_ uuid: UUID) throws -> DisabledDisplayEntry
+    public func forgetAll() throws -> [DisabledDisplayEntry]
 }
 ```
 
-The controller's public initializer uses a per-user Darwin `flock` implementation stored in the user's temporary directory; an internal initializer injects the lock for tests. Hold the lock across the complete snapshot, selection, last-active validation, hardware transaction, and postcondition verification sequence. Use bounded nonblocking acquisition retries and map acquisition failure or timeout to a descriptive `configurationFailed`. Open lock descriptors with `O_CLOEXEC`. Keep `connectAll` under one lock and use internal non-locking helpers to avoid recursive acquisition. Tests must exercise two independent live lock instances contending on the same path, bounded timeout, and release after both successful and throwing protected operations.
+`CoreGraphicsDisplayTransactionFunctions` has `package` visibility: only the CLI wiring and its tests use it.
 
-The live adapter must call `CGBeginDisplayConfiguration`, the dynamically resolved `CGSConfigureDisplayEnabled`, and `CGCompleteDisplayConfiguration(config, .forSession)`. Call `CGCancelDisplayConfiguration` on every failure after a successful begin and before successful completion. If cancellation also fails, preserve both failures in the reported diagnostic. Tests must verify that enable, complete, and cancel receive the exact configuration returned by begin and that completion uses `.forSession`.
+The controller's public initializer uses a per-user Darwin `flock` implementation stored in `stateDirectory` (default `~/Library/Application Support/displayctl/`), next to the ledger; an internal initializer injects the lock for tests. Hold the lock across the complete snapshot, selection, last-active validation, hardware transaction, and postcondition verification sequence. Use bounded nonblocking acquisition retries. Map a timeout to `lockTimeout` and any other acquisition failure to a descriptive `configurationFailed`. Open lock descriptors with `O_CLOEXEC`. Keep `connectAll` under one lock and use internal non-locking helpers to avoid recursive acquisition. Tests must exercise two independent live lock instances contending on the same path, bounded timeout, and release after both successful and throwing protected operations.
 
-After hardware completion, wrap snapshot failures as `postconditionFailed` because final state is unknown. Require exactly one refreshed display with the selected UUID and the requested active state. Make `connectAll` recovery idempotent by treating a candidate that is already active when re-resolved as success. Preserve the original candidate `Display` in every `DisplayConnectionOutcome`, including failures, while retaining the underlying typed `DisplayControlError`.
+The live adapter must call `CGBeginDisplayConfiguration`, the dynamically resolved `CGSConfigureDisplayEnabled`, and `CGCompleteDisplayConfiguration(config, .forSession)`. Call `CGCancelDisplayConfiguration` on every failure after a successful begin and before successful completion. If cancellation also fails, preserve both failures in the reported diagnostic. Tests must verify that enable, complete, and cancel receive the exact configuration returned by begin and that completion uses `.forSession`. Despite its name, a `.forSession` change survives logout (D-008); a reboot undoes it (D-010).
+
+After hardware completion, wrap snapshot failures as `postconditionFailed` because final state is unknown. Require exactly one refreshed display with the selected UUID and the requested active state; after a disable, a UUID absent from the online list also counts as disconnected (D-005). After a disable, fail and roll back if no display is active any more. Make `connectAll` recovery idempotent by treating a candidate that is already active when re-resolved as success. Preserve the original candidate `Display` in every `DisplayConnectionOutcome`, including failures, while retaining the underlying typed `DisplayControlError`. An unreadable ledger is a last failed outcome with a nil `display`.
 
 - [ ] **Step 4: Verify controller behavior**
 
@@ -425,7 +443,7 @@ Expected: compile failure because DDC types do not exist.
 
 - [ ] **Step 3: Implement codec and pure matching**
 
-Define `DDCPacket.writeVCP(code:value:)`, `DDCPacket.readVCP(code:)`, and `DDCPacket.parseVCPReply(_:expectedCode:)`. Define a `DDCServiceCandidate` containing registry service ID, location, EDID UUID, product name, serial, and display location. Score exact display-location match highest, then serial, product/vendor, name, manufacture date, and physical size. Require a documented minimum score and reject tied highest scores.
+Define `DDCPacket.writeVCP(code:value:)`, `DDCPacket.readVCP(code:)`, and `DDCPacket.parseVCPReply(_:expectedCode:)`. Define a `DDCServiceCandidate` containing registry service ID, location, EDID UUID, product name, serial, and display location. Score exact display-location match highest, then serial, product/vendor, name, manufacture date, and physical size. Require a documented minimum score and reject tied highest scores. In the shipped code only the serial can qualify a match, because the display side never fills in a location or EDID UUID (design §6.4).
 
 The checksum implementation must XOR the DDC write seed with every packet byte except the checksum slot. The parser must validate source address, opcode, VCP code, result code, length, and checksum before returning current and maximum values.
 
@@ -550,12 +568,14 @@ enum CLICommand: Equatable {
     case connect(selector: String)
     case connectAll
     case disconnect(selector: String)
+    case forget(uuid: UUID)
+    case forgetAll
     case brightnessGet(selector: String)
     case brightnessSet(selector: String, percent: Int)
 }
 ```
 
-Manual parsing avoids a dependency. No arguments and `--help` select `.help` and print the complete command synopsis with exit code `0`. Compose live inventory, private bridge, connection controller, IOAV transport, and brightness controller only after parsing succeeds. `list --json` encodes `[Display]` with sorted keys; human output includes UUID, runtime ID, name, kind, online, active, main, and DDC capability. Map usage errors to `64`, unavailable APIs/capabilities to `69`, temporary transport failures to `75`, and other operation failures to `1`.
+Manual parsing avoids a dependency. No arguments and `--help` select `.help` and print the complete command synopsis with exit code `0`. Compose live inventory, private bridge, connection controller, IOAV transport, and brightness controller only after parsing succeeds. `list --json` encodes `[Display]` with sorted keys; human output includes UUID, runtime ID, name, kind, online, active, main, and DDC capability. Map usage errors to `64`, unavailable APIs/capabilities to `69`, temporary failures to `75` (DDC timeout, transport or invalid response, `lockTimeout`, `inventoryChanged`), and other operation failures to `1`.
 
 - [ ] **Step 4: Verify CLI behavior**
 
@@ -593,6 +613,8 @@ Expected: exit `0` and commands matching the design.
 - [ ] **Step 3: Implement the opt-in interactive script**
 
 `Scripts/hardware-test.sh` must use `set -euo pipefail`, refuse non-interactive execution, build once, print the disruption warning, capture the initial JSON list, and require explicit confirmation before each disconnect or brightness mutation. It must install a shell trap that runs `.build/debug/displayctl connect all` on exit. It must not automate logout/login; print that manual check as the final instruction.
+
+> Replaced by the watchdog (D-003, D-004, D-006). The shipped script arms a detached watchdog that runs each disconnect itself and retries `connect all` until the original active displays are back or a hard deadline passes. The exit trap now only triggers that watchdog; if the watchdog is gone, the trap runs the same bounded `connect all` retry loop. See the README's Watchdog section.
 
 - [ ] **Step 4: Validate documentation and script syntax**
 
@@ -654,9 +676,9 @@ Expected: valid JSON. If `plutil` rejects JSON from stdin on the installed versi
 
 Depends on sub-phase 1.1 (D-003, D-005, D-006). Order:
 
-1. Internal session-scoped disconnect/reconnect, with the watchdog armed.
+1. Internal disconnect/reconnect, with the watchdog armed.
 2. One unattended run: no confirmation, and the watchdog restores a usable screen.
-3. After a separate opt-in: external session-scoped disconnect/reconnect, with the watchdog armed.
+3. After a separate opt-in: external disconnect/reconnect, with the watchdog armed.
 4. Final-display refusal, with one confirmation per setup disconnect.
 
 External disconnect counts as supported on macOS 27 only if recovery from a dropped display is observed.
