@@ -22,7 +22,28 @@ Status: implementation and hardware validation done; closing (phase review pendi
 - [ ] phase-1-complete.md written, roadmap updated, tracked items closed
 
 ## Sub-phase
-none — 1.1 closed 2026-11-26 (docs/phases/phase-1/phase-1.1-complete.md)
+Sub-phase: 1.2 — Phase 1 review fixes
+Kind: stabilization
+Base: a26062e
+Author: anthropic (claude-opus-5-5)
+Brief: docs/phases/phase-1/phase-1.2-brief.md
+(1.1 closed 2026-11-26: docs/phases/phase-1/phase-1.1-complete.md)
+
+### Allowed work
+Bug fixes, the two error cases, tests and docs per the brief.
+
+### Not allowed
+New features, architecture changes, new dependencies; Phase 2 code.
+
+### Queue
+- [ ] Q1 (P1 correctness) disconnect can leave no active display — src: reviews/phase-codex.md#1, design-claude.md#7 ← CURRENT
+- [ ] Q2 (P3 architecture) snapshot retries an inconsistent sample; `inventoryChanged` case — src: design-claude.md#6
+- [ ] Q3 (P4 architecture) `lockTimeout` case, exit 75 — src: design-claude.md#9
+- [ ] Q4 (P4 correctness) `ddcInvalidResponse` exits 75 — src: phase-claude.md#5
+- [ ] Q5 (P3 correctness) production identity through the matcher — src: phase-claude.md#2
+- [ ] Q6 (P3 architecture) transaction table package-visible — src: phase-codex.md#4
+- [ ] Q7 (P2 correctness) Phase 1 design/plan in sync; serial-only DDC and per-path UUID documented — src: design-claude.md#1–#4, #11
+- [ ] Q8 Codex review of a26062e..HEAD + triage
 
 ## Program
 none
@@ -33,7 +54,8 @@ none
 - (P4 architecture) Phase 3: shared brightness boundary so keys and slider writes are ordered — src: phases/phase-2/reviews/design-codex.md#11
 
 ## Notes
-- 2026-11-26: Close blocked: phase review found an accepted P1 (reviews/phase-codex.md#1), docs out of sync (design-claude #1, #2) and an HDMI brightness recheck (phase-codex #3). Proposed: stabilization sub-phase 1.2.
+- 2026-11-26: Close blocked: phase review found an accepted P1 (reviews/phase-codex.md#1) and docs out of sync (design-claude #1, #2). Sub-phase 1.2 started (owner: "yes").
+- 2026-11-25: HDMI brightness recheck with doubled DDC sends (phase-codex #3): the owner ran the Dell on HDMI all day with the installed binary (built 2026-11-23 14:18, after cb24ec8) and changed brightness successfully.
 - 2026-11-26: reboot test — the built-in display came back after a reboot; a later `connect all` removed the earlier-boot ledger entry, exit 0 (D-010).
 - 2026-11-25: Phase 2 (menu bar app, D-009) design started in parallel. Phase 2 base: 7aa83e3c8424d088d1967401da867e6348e6e4b6. No Phase 2 code until Phase 1 closes; this file switches to Phase 2 then.
 - 2026-11-25: Phase 2 design + plan reviewed twice by Codex (reviews/design-codex.md, design2-codex.md), triaged. The loop stopped with P2 findings resolved on paper but not re-reviewed, by owner decision ("Stop design reviews here?" → "yes"); the Phase 2 code review must check them. Design and plan await owner approval of the amended versions before implementation.
