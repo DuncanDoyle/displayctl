@@ -86,6 +86,11 @@ run_child() {
     fi
     elapsed=$(( $(now) - start ))
     count="$(active_count)"
+    # Timers start at the zero reading, before the diagnostic list below can use its limit.
+    if [ -z "$dark_at" ] && [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
+      dark_at="$(now)"
+      echo "$(stamp) no active display: timers start now"
+    fi
     listing="$(bounded 10 "$DISPLAYCTL" list 2>&1 || true)"
     if [ "$listing" != "$last" ]; then
       echo "$(stamp) t=${elapsed}s active displays: $count"
@@ -103,10 +108,7 @@ run_child() {
       continue
     fi
     if [ -z "$dark_at" ]; then
-      if [ "$count" = "0" ]; then
-        dark_at="$(now)"
-        echo "$(stamp) no active display: timers start now"
-      elif [ "$elapsed" -ge "$WAIT_FOR_DARK" ]; then
+      if [ "$elapsed" -ge "$WAIT_FOR_DARK" ]; then
         echo "$(stamp) no display went dark within ${WAIT_FOR_DARK}s; fallback exits."
         return 0
       fi
@@ -127,7 +129,8 @@ run_child() {
       echo "$(stamp) dark+${t}s still no active display: running connect all"
       bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || true
     fi
-    sleep 1
+    # Sleeps min(1, time left), so the loop does not run past the deadline.
+    if [ "$(time_left)" -gt 0 ]; then sleep 1; fi
   done
 }
 
