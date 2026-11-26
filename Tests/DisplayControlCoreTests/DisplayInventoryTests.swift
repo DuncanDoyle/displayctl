@@ -431,6 +431,18 @@ final class DisplayInventoryTests: XCTestCase {
     XCTAssertFalse(try XCTUnwrap(ddc.first { $0.runtimeID == 1 }).isPlaceholder)
   }
 
+  // The placeholder's physical size is under 1 mm, not necessarily exactly zero.
+  func testPlaceholderSizeUnderOneMillimetreCounts() {
+    XCTAssertTrue(
+      DisplayInventory.isPlaceholder(
+        vendorNumber: 1_970_170_734, modelNumber: 1_986_622_068,
+        sizeMillimeters: CGSize(width: 0.3, height: 0.2), hasCurrentMode: false))
+    XCTAssertFalse(
+      DisplayInventory.isPlaceholder(
+        vendorNumber: 1_970_170_734, modelNumber: 1_986_622_068,
+        sizeMillimeters: CGSize(width: 1, height: 0.2), hasCurrentMode: false))
+  }
+
   // The placeholder may report a mode object of 0×0 pixels instead of no mode at all.
   func testOnlyAModeWithAPixelSizeCountsAsCurrentMode() {
     XCTAssertFalse(DisplayInventory.hasUsableMode(pixelWidth: nil, pixelHeight: nil))

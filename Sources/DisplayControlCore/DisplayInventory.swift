@@ -113,12 +113,12 @@ public struct DisplayInventory: DisplaySnapshotProviding {
   }
 
   /// The macOS placeholder signature seen on macOS 27.0.1 (D-012): vendor 'unkn', model 'virt',
-  /// 0×0 mm and no current mode with a pixel size. A heuristic: all four must hold.
+  /// under 1 mm each way and no current mode with a pixel size. A heuristic: all four must hold.
   static func isPlaceholder(
     vendorNumber: UInt32, modelNumber: UInt32, sizeMillimeters: CGSize, hasCurrentMode: Bool
   ) -> Bool {
     vendorNumber == placeholderVendor && modelNumber == placeholderModel
-      && sizeMillimeters == .zero && !hasCurrentMode
+      && sizeMillimeters.width < 1 && sizeMillimeters.height < 1 && !hasCurrentMode
   }
 
   private static let placeholderVendor: UInt32 = 0x756E_6B6E  // 'unkn'
