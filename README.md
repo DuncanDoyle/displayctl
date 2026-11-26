@@ -70,7 +70,7 @@ If it crashes, launchd restarts it. Logs:
 log show --predicate 'subsystem == "displayctl"' --last 1h
 ```
 
-Safety net: when no usable display is active (the macOS placeholder does not count), at launch, after a display change, after wake, and every 10 s while a display it turned off is in the saved list, the app turns displays that `displayctl` turned off back on, up to 3 attempts. The check and the reconnect happen under the same lock as the CLI. It never turns a display off and never starts while a usable display is active; once it starts at zero it may turn on every display it can, like `connect all`. After 3 failed attempts it waits 60 s (a wake ends the wait). When it finds a usable display active, it also clears saved entries for displays that are already on.
+Safety net: when no usable display is active (the macOS placeholder does not count), at launch, after a display change, after wake, and every 10 s while a display it turned off is in the saved list, the app turns displays that `displayctl` turned off back on, up to 3 attempts. The check and the reconnect happen under the same lock as the CLI. It never turns a display off and never starts while a usable display is active; once it starts at zero it may turn on every display it can, like `connect all`. After an attempt run that ends without a usable display (3 failed attempts, or a display list that kept changing) it waits 60 s; a wake ends the wait. When it finds a usable display active, it also clears saved entries for displays that are already on.
 
 After an undock, macOS may show a placeholder display with no name. `displayctl` ignores it, and `list` notes it on standard error.
 

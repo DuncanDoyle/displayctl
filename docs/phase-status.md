@@ -38,6 +38,7 @@ none
 
 ## Carry-over (deferred to later phases)
 - (P4 correctness) HDMI `brightness get external` with the current binary, next time the Dell is on HDMI — src: phases/phase-1/reviews/1.2-codex.md#4
+- (P4 architecture) Phase 3: observer teardown (DispatchSource, timer, CG callback context) if observers can start more than once per process — src: phases/phase-2/reviews/d014-code-codex.md#8
 - (P4 architecture) Phase 3: shared brightness boundary so keys and slider writes are ordered — src: phases/phase-2/reviews/design-codex.md#11
 
 ## Notes
