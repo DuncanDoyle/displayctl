@@ -158,201 +158,135 @@ final class ZeroActiveRecoveryTests: XCTestCase {
 }
 
 final class RecoverySchedulerTests: XCTestCase {
-  func testTriggersInSettleWindowCoalesce() async {
+  func testEventsMergeIntoOneCheckWithoutMovingItsDeadline() async {
     let harness = SchedulerHarness(connector: FakeConnector([.success(nil)]))
 
     for trigger in [RecoveryTrigger.launch, .reconfiguration, .reconfiguration] {
       await harness.scheduler.trigger(trigger)
     }
-    await harness.settleAndDrain(sleeps: 3)
+    await harness.settleAndDrain()
 
+    let durations = await harness.settle.durations
+    XCTAssertEqual(durations, [.seconds(2)])
     XCTAssertEqual(harness.connector.calls, 1)
     XCTAssertEqual(harness.outcomes.values, [.displayActive])
   }
 
-  func testTriggerDuringRecoveredRunIsDropped() async {
-    let gate = Gate()
-    let connector = FakeConnector([.success([enabled(1)])]) { _ in await gate.pass() }
-    let harness = SchedulerHarness(
-      connector: connector, sampler: ScriptedSampler([.success([display(1, active: true)])]))
-
-    await harness.scheduler.trigger(.launch)
-    _ = await harness.settle.waitForSleeps(1)
-    await harness.settle.advanceAll()
-    await gate.waitUntilEntered()
-    await harness.scheduler.trigger(.reconfiguration)
-    let pending = await harness.settle.pendingCount
-    await gate.open()
-    await harness.scheduler.drain()
-
-    XCTAssertEqual(pending, 0)
-    XCTAssertEqual(connector.calls, 1)
-    XCTAssertEqual(harness.outcomes.values, [.recovered(attempts: 1)])
-  }
-
-  func testTriggerDuringDisplayActiveRunStartsOneMoreEpisode() async {
-    // The Dell is active at the check, then unplugged while the episode still runs.
-    let gate = Gate()
-    let connector = FakeConnector([.success(nil), .success([enabled(1)])]) { _ in
-      await gate.pass()
-    }
-    let harness = SchedulerHarness(
-      connector: connector, sampler: ScriptedSampler([.success([display(1, active: true)])]))
-
-    await harness.scheduler.trigger(.launch)
-    _ = await harness.settle.waitForSleeps(1)
-    await harness.settle.advanceAll()
-    await gate.waitUntilEntered()
-    await harness.scheduler.trigger(.reconfiguration)
-    await gate.open()
-    await harness.outcomes.waitForCount(1)
-    // Two windows: the launch and the follow-up; without one, drain only.
-    if await harness.scheduler.generation == 2 {
-      await harness.settleAndDrain(sleeps: 1)
-    } else {
-      await harness.scheduler.drain()
-    }
-
-    XCTAssertEqual(connector.calls, 2)
-    XCTAssertEqual(harness.outcomes.values, [.displayActive, .recovered(attempts: 1)])
-    let idle = await harness.scheduler.isIdle
-    XCTAssertTrue(idle)
-  }
-
-  func testFailedEnableEmittingCallbackDuringRunStillEnds() async {
+  func testEventBurstDuringEpisodeStartsNothing() async {
     let reference = SchedulerReference()
-    // Each enable makes macOS report a reconfiguration before the call returns its failure.
+    // Each enable makes macOS report reconfigurations before the call returns its failure.
     let connector = FakeConnector([.success([stuck(1)])]) { _ in
-      await reference.scheduler?.trigger(.reconfiguration)
+      for _ in 0..<3 { await reference.scheduler?.trigger(.reconfiguration) }
     }
     let harness = SchedulerHarness(connector: connector)
     reference.scheduler = harness.scheduler
 
     await harness.fire(.launch)
 
-    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3)])
     XCTAssertEqual(connector.calls, 3)
+    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3)])
     let pending = await harness.settle.pendingCount
     XCTAssertEqual(pending, 0)
   }
 
-  func testFailedEpisodeIgnoresReconfigurationWhileZeroActive() async {
-    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
-    await harness.fire(.launch)
-
+  func testLastCallbackSawADisplayAndTheNextTickRecovers() async {
+    // The unplug callback sampled the Dell still active; no callback follows once it is gone.
+    let connector = FakeConnector([.success(nil), .success([enabled(1)])])
+    let harness = SchedulerHarness(
+      connector: connector, sampler: ScriptedSampler([.success([display(1, active: true)])]))
+    harness.count.value = 1
     await harness.fire(.reconfiguration)
+    await harness.scheduler.tick()
+    XCTAssertEqual(connector.calls, 1)
+
+    harness.count.value = 0
+    await harness.scheduler.tick()
+
+    XCTAssertEqual(connector.calls, 2)
+    XCTAssertEqual(harness.outcomes.values, [.displayActive, .recovered(attempts: 1)])
+    XCTAssertTrue(harness.log.values.contains("episode started by tick"), "\(harness.log.values)")
+  }
+
+  func testPlaceholderOnlyListCountsAsZero() async {
+    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])])) {
+      DisplayInventory.usableActiveCount(activeIDs: [12], isPlaceholder: { $0 == 12 })
+    }
+
+    await harness.scheduler.tick()
 
     XCTAssertEqual(harness.connector.calls, 3)
     XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3)])
-    // Once when the trigger arrives, once when its window settles.
-    XCTAssertEqual(harness.activeCount.calls, 2)
   }
 
-  func testFailedEpisodeRearmsOnWake() async {
+  func testQueryErrorOnTickTakesNoAction() async {
+    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])])) {
+      throw DisplayControlError.configurationFailed("CGGetActiveDisplayList failed")
+    }
+
+    await harness.scheduler.tick()
+
+    XCTAssertEqual(harness.connector.calls, 0)
+    XCTAssertEqual(harness.outcomes.values, [])
+  }
+
+  func testCooldownAfterFailedEpisodeBlocksEventsAndTicks() async {
     let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
     await harness.fire(.launch)
+
+    for _ in 0..<3 { await harness.scheduler.trigger(.reconfiguration) }
+    await harness.scheduler.tick()
+    harness.clock.advance(.seconds(59))
+    await harness.scheduler.tick()
+    let pending = await harness.settle.pendingCount
+    XCTAssertEqual(pending, 0)
+    XCTAssertEqual(harness.connector.calls, 3)
+
+    harness.clock.advance(.seconds(1))
+    await harness.scheduler.tick()
+
+    XCTAssertEqual(harness.connector.calls, 6)
+    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+  }
+
+  func testInconclusiveEpisodeAlsoStartsCooldown() async {
+    let harness = SchedulerHarness(connector: FakeConnector([.failure(.inventoryChanged)]))
+    await harness.fire(.launch)
+
+    await harness.scheduler.tick()
+
+    XCTAssertEqual(harness.connector.calls, 5)
+    XCTAssertEqual(harness.outcomes.values, [.inconclusive])
+  }
+
+  func testWakeEndsCooldownAndStartsAFreshEpisode() async {
+    // Lid closed: the episode's enables cannot light the built-in, so it fails.
+    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
+    await harness.fire(.reconfiguration)
 
     await harness.fire(.wake)
 
     XCTAssertEqual(harness.connector.calls, 6)
     XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+    XCTAssertTrue(harness.log.values.contains("episode started by wake"), "\(harness.log.values)")
   }
 
-  func testFailedEpisodeRearmsWhenActiveCountAboveZero() async {
-    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
-    await harness.fire(.launch)
-
-    harness.activeCount.value = 1
-    await harness.fire(.reconfiguration)
-    XCTAssertEqual(harness.connector.calls, 3)
-
-    harness.activeCount.value = 0
-    await harness.fire(.reconfiguration)
-    XCTAssertEqual(harness.connector.calls, 6)
-    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
-  }
-
-  func testPlaceholderOnlyReconfigurationKeepsFailedNetDisarmedUntilReplug() async {
-    // Live-style count over active IDs; ID 12 is the macOS placeholder.
-    let activeIDs = Mutex<[UInt32]>([])
-    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])])) {
-      DisplayInventory.usableActiveCount(
-        activeIDs: activeIDs.withLock { $0 }, isPlaceholder: { $0 == 12 })
-    }
-    await harness.fire(.launch)
-
-    // A counted placeholder would re-arm here and run an episode on the second callback.
-    activeIDs.withLock { $0 = [12] }
-    await harness.fire(.reconfiguration)
-    await harness.fire(.reconfiguration)
-    XCTAssertEqual(harness.connector.calls, 3)
-
-    // Dell plugged back in re-arms; the next undock runs an episode.
-    activeIDs.withLock { $0 = [5] }
-    await harness.fire(.reconfiguration)
-    XCTAssertEqual(harness.connector.calls, 3)
-    activeIDs.withLock { $0 = [12] }
-    await harness.fire(.reconfiguration)
-    XCTAssertEqual(harness.connector.calls, 6)
-  }
-
-  func testDisplayActiveInsideOneSettleWindowRearmsAfterFailure() async {
-    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
-    await harness.fire(.launch)
-
-    // The Dell is plugged in, then unplugged again before the window ends.
-    harness.activeCount.value = 1
-    await harness.scheduler.trigger(.reconfiguration)
-    harness.activeCount.value = 0
-    await harness.scheduler.trigger(.reconfiguration)
-    await harness.settleAndDrain(sleeps: 2)
-
-    XCTAssertEqual(harness.connector.calls, 6)
-    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
-  }
-
-  func testCountSampledAtArrivalRearmsAfterFailure() async {
-    let harness = SchedulerHarness(connector: FakeConnector([.success([stuck(1)])]))
-    await harness.fire(.launch)
-
-    // Plug and unplug were sampled when macOS reported them; the live count already reads 0.
-    harness.activeCount.value = 0
-    await harness.scheduler.trigger(.reconfiguration, activeCount: 1)
-    await harness.scheduler.trigger(.reconfiguration, activeCount: 0)
-    await harness.settleAndDrain(sleeps: 2)
-
-    XCTAssertEqual(harness.connector.calls, 6)
-    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
-  }
-
-  func testReconfigurationStampedDuringEpisodeIsDroppedWhenDeliveredLate() async throws {
-    let stamp = Mutex<ContinuousClock.Instant?>(nil)
-    let connector = FakeConnector([.failure(.inventoryChanged)]) { _ in
-      stamp.withLock { $0 = $0 ?? .now }
+  func testWakeDuringEpisodeChecksAgainAfterIt() async {
+    let reference = SchedulerReference()
+    let connector = FakeConnector([.success([stuck(1)])]) { call in
+      if call == 1 { await reference.scheduler?.trigger(.wake) }
     }
     let harness = SchedulerHarness(connector: connector)
-    await harness.fire(.launch)
-    XCTAssertEqual(harness.outcomes.values, [.inconclusive])
+    reference.scheduler = harness.scheduler
 
-    // macOS reported it during the episode; it reaches the scheduler only now.
-    let arrival = try XCTUnwrap(stamp.withLock { $0 })
-    await harness.scheduler.trigger(.reconfiguration, at: arrival)
-    let idle = await harness.scheduler.isIdle
-    if !idle { await harness.settleAndDrain(sleeps: 1) }
+    await harness.scheduler.trigger(.reconfiguration)
+    _ = await harness.settle.waitForSleeps(1)
+    await harness.settle.advanceAll()
+    await harness.outcomes.waitForCount(1)
+    await harness.settleAndDrain()
 
-    XCTAssertTrue(idle)
-    XCTAssertEqual(connector.calls, 5)
-    XCTAssertEqual(harness.outcomes.values, [.inconclusive])
-  }
-
-  func testInconclusiveDoesNotDisarm() async {
-    let harness = SchedulerHarness(connector: FakeConnector([.failure(.inventoryChanged)]))
-    await harness.fire(.launch)
-
-    await harness.fire(.reconfiguration)
-
-    XCTAssertEqual(harness.outcomes.values, [.inconclusive, .inconclusive])
-    XCTAssertEqual(harness.activeCount.calls, 0)
+    XCTAssertEqual(connector.calls, 6)
+    XCTAssertEqual(harness.outcomes.values, [.failed(attempts: 3), .failed(attempts: 3)])
+    XCTAssertTrue(harness.log.values.contains("episode started by wake"), "\(harness.log.values)")
   }
 }
 
@@ -448,33 +382,6 @@ private actor ManualSleeper {
   }
 }
 
-/// Holds callers of `pass()` until `open()`; the test can wait for the first caller.
-private actor Gate {
-  private var entered = false
-  private var isOpen = false
-  private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
-  private var held: [CheckedContinuation<Void, Never>] = []
-
-  func pass() async {
-    entered = true
-    for waiter in enteredWaiters { waiter.resume() }
-    enteredWaiters = []
-    if isOpen { return }
-    await withCheckedContinuation { held.append($0) }
-  }
-
-  func waitUntilEntered() async {
-    if entered { return }
-    await withCheckedContinuation { enteredWaiters.append($0) }
-  }
-
-  func open() {
-    isOpen = true
-    for caller in held { caller.resume() }
-    held = []
-  }
-}
-
 private final class Recorder<Value: Sendable>: Sendable {
   private struct State {
     var values: [Value] = []
@@ -506,20 +413,25 @@ private final class Recorder<Value: Sendable>: Sendable {
   }
 }
 
-private final class FakeActiveCount: Sendable {
-  private let state = Mutex((value: 0, calls: 0))
+/// The usable active count a tick reads; 0 unless the test sets it.
+private final class FakeCount: Sendable {
+  private let state = Mutex(0)
 
   var value: Int {
-    get { state.withLock { $0.value } }
-    set { state.withLock { $0.value = newValue } }
+    get { state.withLock { $0 } }
+    set { state.withLock { $0 = newValue } }
   }
-  var calls: Int { state.withLock { $0.calls } }
+}
 
-  func count() -> Int {
-    state.withLock { state in
-      state.calls += 1
-      return state.value
-    }
+/// A clock the test moves forward by hand.
+private final class FakeClock: Sendable {
+  private let start = ContinuousClock.now
+  private let offset = Mutex(Duration.zero)
+
+  var now: ContinuousClock.Instant { start + offset.withLock { $0 } }
+
+  func advance(_ duration: Duration) {
+    offset.withLock { $0 += duration }
   }
 }
 
@@ -537,34 +449,40 @@ private struct SchedulerHarness {
   let connector: FakeConnector
   let settle = ManualSleeper()
   let outcomes = Recorder<RecoveryOutcome>()
-  let activeCount = FakeActiveCount()
+  let log = Recorder<String>()
+  let count = FakeCount()
+  let clock = FakeClock()
   let scheduler: RecoveryScheduler
 
-  /// `count` replaces the fake active count when given.
+  /// `usableCount` replaces the fake count when given.
   init(
     connector: FakeConnector,
     sampler: ScriptedSampler = ScriptedSampler([.success([display(1, active: false)])]),
-    count: (@Sendable () -> Int)? = nil
+    usableCount: (@Sendable () throws -> Int)? = nil
   ) {
     self.connector = connector
-    let recovery = ZeroActiveRecovery(sampler: sampler, connector: connector, sleep: { _ in })
+    let log = log
+    let recovery = ZeroActiveRecovery(
+      sampler: sampler, connector: connector, sleep: { _ in }, log: { log.append($0) })
     let settle = settle
     let outcomes = outcomes
-    let activeCount = activeCount
+    let count = count
+    let clock = clock
     scheduler = RecoveryScheduler(
-      recovery: recovery, activeCount: { count?() ?? activeCount.count() },
-      sleep: { await settle.sleep($0) }, onOutcome: { outcomes.append($0) })
+      recovery: recovery, usableCount: { try usableCount?() ?? count.value },
+      sleep: { await settle.sleep($0) }, now: { clock.now }, log: { log.append($0) },
+      onOutcome: { outcomes.append($0) })
   }
 
-  func settleAndDrain(sleeps: Int) async {
-    _ = await settle.waitForSleeps(sleeps)
+  func settleAndDrain() async {
+    _ = await settle.waitForSleeps(1)
     await settle.advanceAll()
     await scheduler.drain()
   }
 
   func fire(_ trigger: RecoveryTrigger) async {
     await scheduler.trigger(trigger)
-    await settleAndDrain(sleeps: 1)
+    await settleAndDrain()
   }
 }
 

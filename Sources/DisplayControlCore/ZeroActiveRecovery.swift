@@ -19,8 +19,9 @@ public enum RecoveryOutcome: Equatable, Sendable {
   case inconclusive
 }
 
+/// What started an episode: an event, or the periodic check (`tick`).
 public enum RecoveryTrigger: String, Sendable {
-  case launch, reconfiguration, wake
+  case launch, reconfiguration, wake, tick
 }
 
 /// One safety-net episode: enables displays under the lock until one is active, with a bounded
@@ -127,123 +128,131 @@ public struct ZeroActiveRecovery: Sendable {
   }
 }
 
-/// Debounces triggers (settle), runs one episode at a time, drops triggers that arrived during one;
-/// after .displayActive such triggers start one more episode instead.
-/// After .failed only .wake, or a .reconfiguration seeing activeCount() > 0, re-arms it.
-/// `activeCount` counts usable displays: the macOS placeholder must not count (D-012).
+/// Runs safety-net episodes one at a time (design §6.3, D-014). Events are hints that schedule one
+/// settled check; a tick starts an episode only at a confirmed zero `usableCount`.
+/// An episode that ends without a usable display starts a cooldown; a wake ends it.
 public actor RecoveryScheduler {
   private let recovery: ZeroActiveRecovery
-  private let activeCount: @Sendable () async -> Int
+  private let usableCount: @Sendable () async throws -> Int
   private let settle: Duration
+  private let cooldown: Duration
   private let sleep: @Sendable (Duration) async throws -> Void
+  private let now: @Sendable () -> ContinuousClock.Instant
+  private let log: @Sendable (String) -> Void
   private let onOutcome: @Sendable (RecoveryOutcome) -> Void
 
-  private(set) var generation = 0
-  private var latestTrigger = RecoveryTrigger.launch
-  private var wakeInWindow = false
+  /// The trigger of the check waiting out its settle period.
+  private var pendingTrigger: RecoveryTrigger?
   private var running = false
-  private var disarmed = false
-  /// A .reconfiguration that arrived while disarmed saw an active display.
-  private var activeSeenWhileDisarmed = false
-  private var lastEpisodeEnd: ContinuousClock.Instant?
-  private var lastOutcome: RecoveryOutcome?
-  /// A trigger arrived while the current episode ran.
-  private var changedDuringEpisode = false
+  private var wokeDuringEpisode = false
+  private var cooldownEnd: ContinuousClock.Instant?
+  private var nextTaskID = 0
   private var tasks: [Int: Task<Void, Never>] = [:]
 
   public init(
     recovery: ZeroActiveRecovery,
-    activeCount: @escaping @Sendable () async -> Int,
+    usableCount: @escaping @Sendable () async throws -> Int,
     settle: Duration = .seconds(2),
+    cooldown: Duration = .seconds(60),
     sleep: @escaping @Sendable (Duration) async throws -> Void,
+    now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
+    log: @escaping @Sendable (String) -> Void = { _ in },
     onOutcome: @escaping @Sendable (RecoveryOutcome) -> Void = { _ in }
   ) {
     self.recovery = recovery
-    self.activeCount = activeCount
+    self.usableCount = usableCount
     self.settle = settle
+    self.cooldown = cooldown
     self.sleep = sleep
+    self.now = now
+    self.log = log
     self.onOutcome = onOutcome
   }
 
-  /// `arrival` is when macOS reported the event; one from before the last episode ended is dropped,
-  /// unless that episode ended .displayActive. `arrivalCount` is the usable count sampled then.
-  public func trigger(
-    _ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant = .now,
-    activeCount arrivalCount: Int? = nil
-  ) async {
-    guard !belongsToEpisode(arrival) else { return }
-    if disarmed, trigger == .reconfiguration {
-      let count: Int
-      if let arrivalCount { count = arrivalCount } else { count = await activeCount() }
-      if count > 0 { activeSeenWhileDisarmed = true }
+  /// Merges into a pending check without moving its deadline; dropped during an episode or a
+  /// cooldown. A wake ends the cooldown, and one during an episode is checked after it.
+  public func trigger(_ trigger: RecoveryTrigger) {
+    if trigger == .wake {
+      cooldownEnd = nil
+      if running { wokeDuringEpisode = true }
     }
-    // An episode may have run while the count was taken.
-    guard !belongsToEpisode(arrival) else { return }
-    startWindow(trigger)
+    guard !running, !coolingDown else { return }
+    schedule(trigger)
   }
 
-  private func startWindow(_ trigger: RecoveryTrigger) {
-    generation += 1
-    latestTrigger = trigger
-    wakeInWindow = wakeInWindow || trigger == .wake
-    for task in tasks.values { task.cancel() }
-    let id = generation
-    tasks[id] = Task { [settle, sleep] in
-      if (try? await sleep(settle)) != nil {
-        await self.settled(id)
-      }
-      self.removeTask(id)
+  /// The periodic check. A query error means unknown, so it does nothing.
+  public func tick() async {
+    guard canStart else { return }
+    let count: Int
+    do {
+      count = try await usableCount()
+    } catch {
+      log("periodic check: usable display count unavailable: \(error)")
+      return
     }
+    guard count == 0, canStart else { return }
+    await runEpisode(.tick)
   }
 
-  /// Waits until every settle window and episode started so far has finished. For tests.
+  /// Waits until every scheduled check and its episode have finished. For tests.
   func drain() async {
     while let task = tasks.values.first {
       await task.value
     }
   }
 
-  /// True when no settle window or episode is pending. For tests.
-  var isIdle: Bool { tasks.isEmpty }
-
-  private func settled(_ id: Int) async {
-    // A later trigger restarted the settle window.
-    guard id == generation, !running else { return }
-    let trigger = wakeInWindow ? RecoveryTrigger.wake : latestTrigger
-    wakeInWindow = false
-    if disarmed && trigger != .wake {
-      // A display seen active in this window re-arms the net; recover only if none is active now.
-      let sawActive = activeSeenWhileDisarmed
-      activeSeenWhileDisarmed = false
-      let activeNow = await activeCount() > 0
-      if sawActive || activeNow { disarmed = false }
-      guard sawActive, !activeNow, id == generation, !running else { return }
-    }
-    disarmed = false
-    activeSeenWhileDisarmed = false
-    running = true
-    changedDuringEpisode = false
-    let outcome = await recovery.run(trigger: trigger)
-    running = false
-    lastEpisodeEnd = .now
-    lastOutcome = outcome
-    if case .failed = outcome { disarmed = true }
-    // .displayActive enabled nothing, so an event during it is a real change: check once more.
-    if outcome == .displayActive, changedDuringEpisode { startWindow(.reconfiguration) }
-    onOutcome(outcome)
+  private var coolingDown: Bool {
+    guard let cooldownEnd else { return false }
+    return now() < cooldownEnd
   }
 
-  /// True when the trigger arrived during an episode or was stamped before the last one ended.
-  private func belongsToEpisode(_ arrival: ContinuousClock.Instant) -> Bool {
-    if running {
-      changedDuringEpisode = true
-      return true
+  /// A pending check covers a tick, so a tick starts nothing while one waits.
+  private var canStart: Bool { !running && pendingTrigger == nil && !coolingDown }
+
+  private func schedule(_ trigger: RecoveryTrigger) {
+    guard pendingTrigger == nil else {
+      if trigger == .wake { pendingTrigger = .wake }
+      return
     }
-    guard let lastEpisodeEnd, arrival < lastEpisodeEnd else { return false }
-    return lastOutcome != .displayActive
+    pendingTrigger = trigger
+    nextTaskID += 1
+    let id = nextTaskID
+    tasks[id] = Task { [settle, sleep] in
+      try? await sleep(settle)
+      await self.settled()
+      self.removeTask(id)
+    }
+  }
+
+  private func settled() async {
+    guard let trigger = pendingTrigger else { return }
+    pendingTrigger = nil
+    await runEpisode(trigger)
+  }
+
+  private func runEpisode(_ trigger: RecoveryTrigger) async {
+    running = true
+    let outcome = await recovery.run(trigger: trigger)
+    running = false
+    let woke = wokeDuringEpisode
+    wokeDuringEpisode = false
+    onOutcome(outcome)
+    if woke {
+      schedule(.wake)
+    } else if outcome == .inconclusive || outcome.isFailed {
+      cooldownEnd = now() + cooldown
+      log("no usable display after the episode; cooldown \(cooldown)")
+    }
   }
 
   private func removeTask(_ id: Int) {
     tasks[id] = nil
+  }
+}
+
+extension RecoveryOutcome {
+  fileprivate var isFailed: Bool {
+    if case .failed = self { return true }
+    return false
   }
 }

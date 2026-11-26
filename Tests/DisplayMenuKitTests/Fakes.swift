@@ -108,6 +108,10 @@ final class FakeOperations: DisplayOperating {
 
   func setCurrent(_ displays: [Display]) { state.withLock { $0.current = displays } }
 
+  func setLedger(_ ledger: Result<[DisabledDisplayEntry], DisplayControlError>) {
+    state.withLock { $0.ledger = ledger }
+  }
+
   func addSnapshot(_ step: SnapshotStep) { state.withLock { $0.snapshotSteps.append(step) } }
 
   func addSwitch(_ step: SwitchStep) { state.withLock { $0.switchSteps.append(step) } }

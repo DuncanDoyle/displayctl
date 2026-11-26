@@ -364,6 +364,12 @@ public struct ConnectionController: Sendable {
         result = try transition(online, enabled: true)
       }
     } else if let entry {
+      // Whatever ID it holds now, the placeholder's entry must not reach the hardware.
+      if let online = matches.first {
+        throw DisplayControlError.recoverySkipped(
+          "Display \(uuid.uuidString) is the macOS placeholder at runtime ID \(online.runtimeID); "
+            + "its recorded runtime ID \(entry.runtimeID) is not used")
+      }
       guard entry.bootSession == (try bootSession()) else {
         throw DisplayControlError.recoverySkipped(
           "Display \(uuid.uuidString) was disabled in an earlier boot; its recorded runtime ID "
@@ -384,10 +390,7 @@ public struct ConnectionController: Sendable {
     by uuid: UUID,
     in displays: [Display]
   ) throws {
-    // The placeholder holds its runtime ID even when the entry carries its UUID.
-    if let holder = displays.first(where: {
-      $0.runtimeID == runtimeID && ($0.uuid != uuid || $0.isPlaceholder)
-    }) {
+    if let holder = displays.first(where: { $0.runtimeID == runtimeID && $0.uuid != uuid }) {
       throw DisplayControlError.recoverySkipped(
         "Display \(uuid.uuidString) is offline and its recorded runtime ID \(runtimeID) is now "
           + "held by display \(holder.uuid.uuidString)")

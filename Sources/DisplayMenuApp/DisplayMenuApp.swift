@@ -23,7 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   override init() {
     let live = LiveServices()
     model = PanelModel(operations: live.operations, brightness: live.brightness)
-    observers = SystemObservers(scheduler: live.scheduler, model: model)
+    observers = SystemObservers(
+      scheduler: live.scheduler, model: model, operations: live.operations)
     super.init()
   }
 

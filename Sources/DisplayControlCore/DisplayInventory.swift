@@ -137,15 +137,14 @@ public struct DisplayInventory: DisplaySnapshotProviding {
     }
   }
 
-  /// Active displays minus placeholders; cheap enough for the safety net's re-arm check.
+  /// Active displays minus placeholders; cheap enough for the safety net's periodic check.
   static func usableActiveCount(activeIDs: [UInt32], isPlaceholder: (UInt32) -> Bool) -> Int {
     activeIDs.filter { !isPlaceholder($0) }.count
   }
 
-  /// The live usable active count, without a full inventory; an error counts as zero.
-  public static func usableActiveDisplayCount() -> Int {
-    guard let activeIDs = try? activeDisplayIDs() else { return 0 }
-    return usableActiveCount(activeIDs: activeIDs, isPlaceholder: isPlaceholder(_:))
+  /// The live usable active count, without a full inventory; throws if the active list fails.
+  public static func usableActiveDisplayCount() throws -> Int {
+    usableActiveCount(activeIDs: try activeDisplayIDs(), isPlaceholder: isPlaceholder(_:))
   }
 
   /// The UUID Core Graphics maps `runtimeID` to right now, or nil when it maps none.

@@ -325,6 +325,20 @@ final class ConnectionControllerTests: XCTestCase {
     XCTAssertEqual(ledger.entries, [entry(for: placeholder(12))])
   }
 
+  func testRecoverRefusesPlaceholderEntryAfterItsRuntimeIDChanged() throws {
+    // The ledger saved the placeholder at ID 12; it is online at 13 now and 12 is free.
+    let store = FakeDisplayStore([placeholder(13)])
+    let ledger = FakeLedger([entry(for: placeholder(12))])
+
+    let outcomes = try XCTUnwrap(makeController(store, ledger: ledger).recoverIfNoneActive())
+
+    XCTAssertEqual(outcomes.map(\.display?.uuid), [placeholder(12).uuid])
+    guard case .failure(let error) = outcomes[0].result else { return XCTFail("expected skip") }
+    assertSkipped(error, contains: ["placeholder", "runtime ID 13"])
+    XCTAssertEqual(store.requests, [])
+    XCTAssertEqual(ledger.entries, [entry(for: placeholder(12))])
+  }
+
   func testConnectAllNeverReportsThePlaceholderAsConnected() throws {
     let store = FakeDisplayStore([fixture(1, active: true), placeholder(12)])
     let ledger = FakeLedger([entry(for: placeholder(12))])

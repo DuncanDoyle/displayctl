@@ -26,8 +26,9 @@ struct LiveServices: Sendable {
       sleep: { try? await Task.sleep(for: $0) },
       log: { logger.notice("\($0, privacy: .public)") })
     scheduler = RecoveryScheduler(
-      recovery: recovery, activeCount: { DisplayInventory.usableActiveDisplayCount() },
+      recovery: recovery, usableCount: { try DisplayInventory.usableActiveDisplayCount() },
       sleep: { try await Task.sleep(for: $0) },
+      log: { logger.notice("\($0, privacy: .public)") },
       onOutcome: { logger.notice("episode outcome: \(String(describing: $0), privacy: .public)") })
   }
 }
