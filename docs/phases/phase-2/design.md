@@ -124,7 +124,7 @@ On a trigger:
 2. Call `recoverIfNoneActive()`. It checks and acts under the operation lock (§5). `nil` means a display is active: done.
 3. Otherwise check the result. Recovery succeeded if a fresh snapshot shows at least one active display. Every failed outcome is logged with its display and reason, including a refused earlier-boot entry and an unreadable ledger (returned as an outcome with no display).
 4. If still no display is active, retry (default 3 attempts in total, 2 s apart). A thrown error, such as a lock timeout while a CLI command runs, counts as a failed attempt.
-5. An inconsistent sample (`inventoryChanged`, thrown after the inventory's own 3 quick retries), whether from the locked check or the verification, is not an attempt: it is sampled again after the retry delay, up to 5 times per episode. If those run out, the episode ends as inconclusive.
+5. An inconsistent sample (`inventoryChanged`, thrown once the inventory's 3 samples in total all failed), whether from the locked check or the verification, is not an attempt: it is sampled again after the retry delay, up to 5 times per episode. If those run out, the episode ends as inconclusive.
 6. Log every decision with `os.Logger` (subsystem `displayctl`, category `recovery`), including the trigger that started the episode.
 
 Episodes: the attempts above form one episode, and only one runs at a time. Triggers that arrive during an episode, including callbacks caused by its own enable calls, are dropped; the episode re-checks on its own. After an episode:
