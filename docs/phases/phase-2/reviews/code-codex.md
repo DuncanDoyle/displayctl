@@ -2,7 +2,7 @@ Cross-model: YES (author: anthropic/claude-opus-5-5, reviewer: openai/gpt-6.2-so
 cli: codex · resolved_model: gpt-6.2-sol · status: ok
 Scope: phase 2 (mid-phase, Tasks 2–6)
 Dimensions: both
-Diff: f39f451..411dabf
+Diff: 860cbea..661d2aa
 Timing: on time (before hardware testing)
 Note: local checkout paths in the reviewer's links were rewritten to repo-relative paths before commit (finding 8).
 ---
@@ -48,7 +48,7 @@ The author reported 217 passing tests across the three suites, zero warnings, an
 | 2 | Re-arm debounce can lose the next undock | correctness | reviewer | accept | Active count sampled at each trigger's arrival while disarmed. |
 | 3 | Reopen read can overwrite a newer slider value | correctness | reviewer | accept | Read results dropped when a write for that UUID was submitted after the read began or is still pending. |
 | 4 | Observer judges triggers by delivery, not arrival | architecture | reviewer | accept | Triggers carry an arrival stamp taken in the callback. |
-| 5 | Stale DDC target while a write waits for the DDC actor | architecture | reviewer | reject: same class as the owner-confirmed rejection in design2-codex.md #5 (needs an unplug plus a different monitor in a sub-second window; worst case a brightness change). Design §6.2 now states the guarantee covers queued values only. Pending owner confirmation. | |
+| 5 | Stale DDC target while a write waits for the DDC actor | architecture | reviewer | reject: same class as the owner-confirmed rejection in design2-codex.md #5 (needs an unplug plus a different monitor in a sub-second window; worst case a brightness change). Design §6.2 now states the guarantee covers queued values only. | Owner: "Fine, I'm ok with rejecting" (2026-11-26). |
 | 6 | CLI calls blocking core code from async functions; main-thread name hop | architecture | reviewer | reject: no deadlock path (the CLI's top-level async code leaves the main queue free; `list` verified), and the CLI does one operation per process. Moving the CLI onto an executor adds code no requirement needs. | |
 | 7 | Reinstall changes the live install before validating | correctness | reviewer | accept | Binaries and plist are staged and linted first, path written with `plutil -replace`, then moved into place after bootout. |
 | 8 | Local checkout paths in committed review docs | correctness | reviewer | accept | Rewritten to repo-relative paths in all tracked docs. Already-pushed history still contains them: owner decision on a history rewrite. |
