@@ -1,7 +1,7 @@
 import DisplayControlCore
 
 /// Turns the safety net's periodic check on while the ledger has a current-boot entry (D-014).
-/// An unreadable ledger keeps it on: a tick only reads the display count.
+/// A boot-session or ledger read error leaves it off; events still reach the safety net.
 @MainActor
 public final class PeriodicCheckGate {
   public private(set) var isRunning = false
@@ -24,7 +24,7 @@ public final class PeriodicCheckGate {
       let boot = try await operations.bootSession()
       running = try await operations.disabledDisplays().contains { $0.bootSession == boot }
     } catch {
-      running = true
+      running = false
     }
     guard id == generation, running != isRunning else { return }
     isRunning = running

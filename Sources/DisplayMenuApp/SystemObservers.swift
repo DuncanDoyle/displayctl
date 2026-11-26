@@ -12,11 +12,13 @@ final class SystemObservers {
   private let operations: any DisplayOperating
   private let logger = Logger(subsystem: "displayctl", category: "menu")
   private var wakeToken: (any NSObjectProtocol)?
-  private var ledgerWatch: (any DispatchSourceFileSystemObject)?
   private var timer: Timer?
   private lazy var gate = PeriodicCheckGate(operations: operations) { [weak self] in
     self?.setPeriodicCheck($0)
   }
+  private lazy var ledgerWatcher = LedgerDirectoryWatcher(
+    directory: DisplayControlState.defaultDirectory
+  ) { [weak self] in self?.reloadGate() }
 
   init(scheduler: RecoveryScheduler, model: PanelModel, operations: any DisplayOperating) {
     self.scheduler = scheduler
@@ -26,33 +28,35 @@ final class SystemObservers {
 
   func start() {
     // Hardware test switch: no event fast path, so only the periodic check can recover.
-    if ProcessInfo.processInfo.environment["DISPLAYCTL_MENU_NO_EVENTS"] == "1" {
-      logger.notice("DISPLAYCTL_MENU_NO_EVENTS=1: display and wake events off, periodic check only")
+    let events = ProcessInfo.processInfo.environment["DISPLAYCTL_MENU_NO_EVENTS"] != "1"
+    if events {
+      registerReconfigurationCallback()
     } else {
-      registerEvents()
+      logger.notice(
+        "DISPLAYCTL_MENU_NO_EVENTS=1: display, wake and launch triggers off, periodic check only")
     }
-    watchLedgerDirectory()
-    reloadGate()
+    // Wake always reopens the ledger watch; it triggers a check only when events are on.
+    wakeToken = NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        if events { self?.handle(.wake) }
+        self?.refreshLedgerWatch()
+      }
+    }
+    refreshLedgerWatch()
+    guard events else { return }
     let scheduler = scheduler
     Task { await scheduler.trigger(.launch) }
   }
 
-  private func registerEvents() {
+  private func registerReconfigurationCallback() {
     // The callback context is retained for the whole process and never released.
     let context = Unmanaged.passRetained(self).toOpaque()
     let error = CGDisplayRegisterReconfigurationCallback(displaysReconfigured, context)
     if error != .success {
       logger.error("display reconfiguration callback not registered: \(error.rawValue)")
       model.safetyNetNote = ErrorText.safetyNetOff
-    }
-
-    wakeToken = NSWorkspace.shared.notificationCenter.addObserver(
-      forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-    ) { [weak self] _ in
-      MainActor.assumeIsolated {
-        self?.handle(.wake)
-        self?.reloadGate()
-      }
     }
   }
 
@@ -69,24 +73,15 @@ final class SystemObservers {
     Task { await gate.reload() }
   }
 
-  /// The CLI replaces the ledger atomically, so the directory, not the file, sees each write.
-  private func watchLedgerDirectory() {
+  /// Reopens the ledger watch and reloads the gate; runs at launch and on wake.
+  private func refreshLedgerWatch() {
     let directory = DisplayControlState.defaultDirectory
     try? FileManager.default.createDirectory(
       at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    let descriptor = open(directory.path, O_EVTONLY)
-    guard descriptor >= 0 else {
+    if !ledgerWatcher.restart() {
       logger.error("cannot watch \(directory.path, privacy: .public): errno \(errno)")
-      return
     }
-    let source = DispatchSource.makeFileSystemObjectSource(
-      fileDescriptor: descriptor, eventMask: .write, queue: .main)
-    source.setEventHandler { [weak self] in
-      MainActor.assumeIsolated { self?.reloadGate() }
-    }
-    source.setCancelHandler { close(descriptor) }
-    source.resume()
-    ledgerWatch = source
+    reloadGate()
   }
 
   /// One timer with tolerance; Timer skips missed firings, so nothing is replayed after sleep.

@@ -45,7 +45,21 @@ final class PeriodicCheckGateTests: XCTestCase {
     XCTAssertEqual(changes.values, [])
   }
 
-  func testUnreadableLedgerKeepsTheCheckOn() async {
+  func testUnreadableLedgerTurnsTheCheckOff() async {
+    let operations = FakeOperations([dell()], ledger: .success([entry(builtInID, "Built-in")]))
+    let changes = Changes()
+    let gate = gate(operations, changes)
+    await gate.reload()
+    XCTAssertTrue(gate.isRunning)
+
+    operations.setLedger(.failure(.configurationFailed("Unable to decode display ledger")))
+    await gate.reload()
+
+    XCTAssertFalse(gate.isRunning)
+    XCTAssertEqual(changes.values, [true, false])
+  }
+
+  func testUnreadableLedgerAtLaunchLeavesTheCheckOff() async {
     let operations = FakeOperations(
       [dell()], ledger: .failure(.configurationFailed("Unable to decode display ledger")))
     let changes = Changes()
@@ -53,7 +67,7 @@ final class PeriodicCheckGateTests: XCTestCase {
 
     await gate.reload()
 
-    XCTAssertTrue(gate.isRunning)
-    XCTAssertEqual(changes.values, [true])
+    XCTAssertFalse(gate.isRunning)
+    XCTAssertEqual(changes.values, [])
   }
 }
