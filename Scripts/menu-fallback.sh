@@ -57,10 +57,10 @@ bounded() {
   limit "$secs" "$@"
 }
 
-# Number of displays `displayctl list` reports as active; -1 when list fails or times out.
+# Number of displays `displayctl list` reports as active; -1 when list fails.
 active_count() {
   local out
-  if ! out="$(bounded "${1:-10}" "$DISPLAYCTL" list 2>/dev/null)"; then
+  if ! out="$(bounded 10 "$DISPLAYCTL" list 2>/dev/null)"; then
     echo -1
     return
   fi
@@ -78,7 +78,7 @@ next_gap() {
   echo $(( next - ($(now) - dark_at) ))
 }
 
-# A list call must not run past the next due action: at most 10 s, at least 1 s.
+# The diagnostic list must not run past the next due action: at most 10 s, at least 1 s.
 call_limit() {
   local gap
   gap="$(next_gap)"
@@ -86,7 +86,7 @@ call_limit() {
 }
 
 run_child() {
-  local log="$1" start last count elapsed dark_at="" t kicked=0 gap
+  local log="$1" start last count elapsed dark_at="" t kicked=0 gap rc
   echo $$ > "$log.pid"
   start="$(now)"
   last="unset"
@@ -108,7 +108,7 @@ run_child() {
       return 1
     fi
     elapsed=$(( $(now) - start ))
-    count="$(active_count "$(call_limit)")"
+    count="$(active_count)"
     # Timers start at the zero reading, before the diagnostic list below can use its limit.
     if [ -z "$dark_at" ] && [ "$EVEN_IF_ACTIVE" -eq 0 ] && [ "$count" = "0" ]; then
       dark_at="$(now)"
@@ -124,8 +124,15 @@ run_child() {
       fi
       if [ "$t" -ge "$CONNECT_ALL_AFTER" ]; then
         echo "$(stamp) dark+${t}s still no active display: running connect all"
-        bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" \
-          || echo "$(stamp) connect all did not finish (deadline or time limit)"
+        rc=0
+        bounded 20 "$DISPLAYCTL" connect all 2>&1 | sed "s/^/$(stamp)   /" || rc=$?
+        # 124: not started, deadline passed; 142: stopped by its time limit (SIGALRM).
+        case "$rc" in
+          0) ;;
+          124) echo "$(stamp) connect all not started: deadline passed" ;;
+          142) echo "$(stamp) connect all stopped by its time limit" ;;
+          *) echo "$(stamp) connect all exited $rc" ;;
+        esac
       fi
     fi
     listing="$(bounded "$(call_limit)" "$DISPLAYCTL" list 2>&1 || true)"
