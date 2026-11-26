@@ -25,10 +25,11 @@ struct LiveServices: Sendable {
       sampler: LiveSampler(executor: executor, inventory: inventory),
       connector: LiveRecoveryConnector(executor: executor, controller: controller),
       sleep: { try? await Task.sleep(for: $0) },
-      log: { logger.info("\($0, privacy: .public)") })
+      log: { logger.notice("\($0, privacy: .public)") })
     scheduler = RecoveryScheduler(
       recovery: recovery, activeCount: { activeDisplayCount() },
-      sleep: { try await Task.sleep(for: $0) })
+      sleep: { try await Task.sleep(for: $0) },
+      onOutcome: { logger.notice("episode outcome: \(String(describing: $0), privacy: .public)") })
   }
 }
 

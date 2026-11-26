@@ -60,6 +60,7 @@ run_child() {
     count="$(active_count)"
     if [ "$count" != "$last" ]; then
       echo "$(stamp) t=${elapsed}s active displays: $count"
+      "$DISPLAYCTL" list 2>&1 | sed "s/^/$(stamp)   /" || true
       last="$count"
     fi
     if [ "$EVEN_IF_ACTIVE" -eq 1 ]; then

@@ -20,7 +20,8 @@ cp "$BUILD_DIR/displayctl-menu" "$BIN_DIR/.displayctl-menu.new"
 cp "$BUILD_DIR/displayctl" "$BIN_DIR/.displayctl.new"
 cp "$SCRIPT_DIR/$LABEL.plist" "$PLIST.new"
 # plutil writes the path as a plist string, so no characters in it need escaping.
-plutil -replace ProgramArguments.0 -string "$BIN_DIR/displayctl-menu" "$PLIST.new"
+plutil -replace ProgramArguments -array "$PLIST.new"
+plutil -insert ProgramArguments.0 -string "$BIN_DIR/displayctl-menu" "$PLIST.new"
 plutil -lint "$PLIST.new"
 
 # Stop an old instance; a missing one is fine.

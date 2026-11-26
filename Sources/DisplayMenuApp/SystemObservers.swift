@@ -40,7 +40,7 @@ final class SystemObservers {
 
   /// `arrival` is stamped when macOS reports the event, so the scheduler can drop it by that time.
   fileprivate func handle(_ trigger: RecoveryTrigger, at arrival: ContinuousClock.Instant) {
-    logger.info("trigger \(trigger.rawValue, privacy: .public)")
+    logger.notice("trigger \(trigger.rawValue, privacy: .public)")
     let scheduler = scheduler
     let model = model
     Task { await scheduler.trigger(trigger, at: arrival) }
